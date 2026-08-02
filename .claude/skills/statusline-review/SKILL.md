@@ -134,7 +134,67 @@ patches their own finding has ratified it without anyone checking.
    broken tree
 4. Commit in Japanese, describing what was fixed and why
 5. `git push`
-6. Increment the round and return to 4a
+6. **Resolve the threads you fixed** (see 4f)
+7. Increment the round and return to 4a
+
+### 4f. Close out the threads you fixed
+
+Every finding you fixed gets a reply saying so, then its thread is resolved. GitHub collapses
+resolved threads, so the next round's reader sees only what is still open. Leaving fixed findings
+expanded makes each round look like it accomplished nothing.
+
+List the threads and find the ones you fixed:
+
+```bash
+gh api graphql -f query='
+query {
+  repository(owner: "<owner>", name: "<repo>") {
+    pullRequest(number: <number>) {
+      reviewThreads(first: 50) {
+        nodes { id isResolved isOutdated path line
+          comments(first: 1) { nodes { body } } }
+      }
+    }
+  }
+}'
+```
+
+**Match threads by comment body, not by line number.** Your fix shifts the lines it touches, so
+GitHub reports `line: null` and `isOutdated: true` for exactly those threads. `isOutdated` is a
+useful hint about which threads your commit moved, but it is not proof — an unrelated edit higher
+in the file outdates a thread you never addressed. Read the first comment of each candidate and
+confirm it is a finding you actually fixed before resolving it.
+
+For each confirmed thread, reply and then resolve:
+
+```bash
+gh api graphql -f query='
+  mutation($tid: ID!, $body: String!) {
+    addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $tid, body: $body}) {
+      comment { id }
+    }
+  }' -f tid="<thread-id>" -f body="<返信本文>"
+
+gh api graphql -f query='
+  mutation($tid: ID!) {
+    resolveReviewThread(input: {threadId: $tid}) { thread { isResolved } }
+  }' -f tid="<thread-id>"
+```
+
+The reply follows this shape:
+
+```markdown
+✅ 第 N 周で修正しました（<短縮 SHA>）。
+
+<何をどう直したか>
+
+**検証**: <実行した確認と、その結果>
+```
+
+**Only resolve what you actually fixed and verified.** Resolving a thread hides it; hiding a
+finding that is still live is worse than never reporting it. Findings you deliberately left
+unfixed — Should fix, Consider, Medium, Low — stay open. They are decisions to defer, not
+problems that went away.
 
 ## Rules that hold throughout
 
