@@ -1,0 +1,19 @@
+{
+  "name": "@chieeeeno/claude-statusline",
+  "version": "1.0.0",
+  "description": "A fast, dependency-free status line for Claude Code. Shows context, rate limits, and cost. Renders in Python - no Node at render time.",
+  "bin": { "claude-statusline": "bin/claude-statusline.js" },
+  "files": ["bin/", "statusline.py", "README.md", "LICENSE"],
+  "engines": { "node": ">=18" },
+  "os": ["darwin", "linux"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chieeeeno/claude-statusline.git"
+  },
+  "keywords": ["claude", "claude-code", "statusline", "cli", "anthropic"],
+  "publishConfig": { "access": "public" },
+  "scripts": {
+    "test": "python3 -m unittest discover -s tests -v"
+  }
+}

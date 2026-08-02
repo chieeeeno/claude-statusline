@@ -1,0 +1,9 @@
+node_modules/
+*.tgz
+__pycache__/
+*.pyc
+.DS_Store
+
+# 引き継ぎ資料。設計の記録として手元に残すが、公開リポジトリには含めない。
+# handover/artifacts/statusline-payload.json には session_id と transcript_path の実測値が入る。
+handover/
