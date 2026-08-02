@@ -98,7 +98,7 @@ not reliably reach the caller here. Read the files rather than waiting on messag
 a failed round for that reviewer: stop it, spawn a replacement with the same prompt, and say so in
 the PR summary if it happens twice. Never record a missing report as「問題なし」.
 
-### 4b. Collect the reports, stop the reviewers, then merge
+### 4b. Collect the reports, stop the reviewers, and merge the findings
 
 Read both report files:
 
@@ -106,11 +106,8 @@ Read both report files:
 ls -l /tmp/statusline-review/r<周番号>-*.md
 ```
 
-**As soon as both reports are in hand, stop both agents.**
-
-```bash
-# TaskStop で各エージェントを名前指定して停止する
-```
+**As soon as both reports are in hand, stop both agents** with `TaskStop`, passing each agent's
+name as `task_id`.
 
 A reviewer that has delivered its report has nothing left to do, but it stays resident and keeps
 emitting idle notifications. Leaving them running across three rounds accumulates agents that all
@@ -121,7 +118,7 @@ concluded last time.
 Stop them **after** you have the reports, never before. Stopping an agent mid-audit loses its work
 silently, and you will not know what it was about to find.
 
-### Merge the findings
+Once both agents are stopped, merge:
 
 - Deduplicate by `file:line`. If both agents report the same location, keep the security framing —
   it carries the attack path
