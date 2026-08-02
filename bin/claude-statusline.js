@@ -165,8 +165,26 @@ function usage() {
   --runcat enables writing ~/.claude/runcat-usage.json for RunCat Neo (off by default).`);
 }
 
+const KNOWN_FLAGS = new Set([
+  "--install",
+  "--uninstall",
+  "--print",
+  "--version",
+  "--help",
+  "--runcat",
+]);
+
 const args = process.argv.slice(2);
 const has = (flag) => args.includes(flag);
+
+// 打ち間違えたフラグを usage + exit 0 で返すと、`cmd && next` で繋いだ
+// セットアップスクリプトが成功と判断して先へ進んでしまう。
+const unknown = args.filter((a) => !KNOWN_FLAGS.has(a));
+if (unknown.length) {
+  console.error(`claude-statusline: unknown option: ${unknown.join(", ")}`);
+  console.error("  Run claude-statusline --help to see the available options.");
+  process.exit(1);
+}
 
 if (has("--version")) console.log(packageVersion());
 else if (has("--install")) install({ runcat: has("--runcat") });

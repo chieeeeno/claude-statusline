@@ -2,6 +2,11 @@ name: test
 
 on: [push, pull_request]
 
+# fork からの PR でもランナー上でこのリポジトリのコードが実行される。
+# 既定権限に頼らず、必要な読み取りだけを明示しておく。
+permissions:
+  contents: read
+
 jobs:
   # ランナー標準の python3 で動くこと自体がこのパッケージの要件なので、
   # このジョブでは意図的に Python をセットアップしない。
@@ -15,8 +20,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: Show the interpreter under test
         run: python3 -VV
+      # モジュールを直に指定する。discover だと、テストファイルが消えたり
+      # 命名から外れたりしたときに Python 3.8/3.9 が 0 件を成功として扱う。
       - name: Run unit tests
-        run: python3 -m unittest discover -s tests -v
+        run: python3 -m unittest tests.test_statusline -v
+      # ユニットテストは部品関数しか呼ばない。main() が壊れていても
+      # 全件通るため、製品の実行経路を一度は通しておく。
+      - name: Render a payload end to end
+        run: |
+          echo '{"model":{"display_name":"Opus 5"},"context_window":{"used_percentage":25,"total_input_tokens":50000,"context_window_size":200000}}' \
+            | python3 statusline.py
 
   # 宣言している最小サポート版。ここが無いと、engines に 3.8 と書きながら
   # 3.8 で動くことを誰も確かめていない状態になる。
@@ -28,11 +41,17 @@ jobs:
         with:
           python-version: "3.8"
       - name: Run unit tests
-        run: python3 -m unittest discover -s tests -v
+        run: python3 -m unittest tests.test_statusline -v
+      # import できるだけでは 3.8 互換の証明にならない。実行時にしか
+      # 現れない非互換（str.removeprefix など）をここで捕まえる。
+      - name: Render a payload end to end
+        run: |
+          echo '{"model":{"display_name":"Opus 5"},"context_window":{"used_percentage":25,"total_input_tokens":50000,"context_window_size":200000}}' \
+            | python3 statusline.py
 
-  # files に挙げたファイルが実際に同梱されるかを確認する。
-  # 作業ツリーには未コミットのファイルが存在しうるため、
-  # クリーンチェックアウトで確かめる意味がある。
+  # 配布物の検査。チェックアウトに在るかではなく tarball に入ったかを見る。
+  # files に "bin/" と書いた場合、ディレクトリが空でも存在検査は通ってしまい、
+  # エントリポイントが消えたまま緑になる。
   package:
     runs-on: ubuntu-latest
     steps:
@@ -40,30 +59,39 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Show what would be published
-        run: npm pack --dry-run
-      - name: Every file listed in "files" must exist
+      # --ignore-scripts を付けて、PR が持ち込んだ prepack 等が
+      # ランナー上で走る経路を閉じる。同梱一覧の取得には影響しない。
+      - name: Collect what would be published
+        run: npm pack --dry-run --ignore-scripts --json > /tmp/pack.json
+      - name: Check the tarball contents and publish settings
         run: |
           node -e '
-            const fs = require("fs");
-            const missing = require("./package.json").files
-              .filter((f) => !fs.existsSync(f.replace(/\/$/, "")));
-            if (missing.length) {
-              console.error("missing from the checkout: " + missing.join(", "));
-              process.exit(1);
-            }
-            console.log("all files present");
-          '
-      - name: The tarball must not contain tests, CI, docs or agent definitions
-        run: |
-          npm pack --dry-run --json > /tmp/pack.json
-          node -e '
-            const files = require("/tmp/pack.json")[0].files.map((f) => f.path);
-            const leaked = files.filter((p) =>
+            const pkg = require("./package.json");
+            const entries = require("/tmp/pack.json")[0].files;
+            const paths = entries.map((f) => f.path);
+            const fail = (msg) => { console.error(msg); process.exitCode = 1; };
+
+            // bin フィールドの指す先まで含めて、実際に同梱されたかを見る
+            const required = ["statusline.py", "README.md", "LICENSE", "package.json",
+                              ...Object.values(pkg.bin)];
+            const absent = required.filter((f) => !paths.includes(f));
+            if (absent.length) fail("missing from the tarball: " + absent.join(", "));
+
+            const leaked = paths.filter((p) =>
               /^(tests|\.github|docs|handover|\.claude)\//.test(p));
-            if (leaked.length) {
-              console.error("leaked into the tarball: " + leaked.join(", "));
-              process.exit(1);
-            }
-            console.log("tarball contents: " + files.join(", "));
+            if (leaked.length) fail("leaked into the tarball: " + leaked.join(", "));
+
+            // スコープ付きパッケージはこれが無いと publish が権限エラーで落ちる
+            if (pkg.publishConfig?.access !== "public") fail("publishConfig.access must be public");
+
+            // Windows は非対応。外すと入るだけ入って描画が沈黙する
+            if (JSON.stringify(pkg.os) !== JSON.stringify(["darwin", "linux"]))
+              fail("os must be [darwin, linux], got " + JSON.stringify(pkg.os));
+
+            const notExecutable = entries
+              .filter((f) => /\.(py|js)$/.test(f.path) && !(f.mode & 0o111))
+              .map((f) => f.path);
+            if (notExecutable.length) fail("not executable: " + notExecutable.join(", "));
+
+            if (!process.exitCode) console.log("tarball ok: " + paths.join(", "));
           '
