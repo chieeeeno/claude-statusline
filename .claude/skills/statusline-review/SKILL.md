@@ -76,7 +76,35 @@ Give each the same input: the base ref, the head ref, and the list of changed fi
 round number. Do not pass along your own opinion of the code — you wrote it, and seeding them with
 your reasoning defeats the point of reviewing in a separate context.
 
-### 4b. Stop the reviewers, then merge
+**Put every instruction in the spawn prompt.** Messages sent to a reviewer after it starts are
+unreliable in this environment — an agent can go idle and stop acting on its inbox entirely. If
+you find yourself needing to send a correction mid-run, stop the agent and spawn a fresh one with
+the corrected prompt instead of nudging it.
+
+**Tell each reviewer where to write its report**, and say so near the top of the prompt:
+
+```
+/tmp/statusline-review/r<周番号>-quality.md
+/tmp/statusline-review/r<周番号>-security.md
+```
+
+`mkdir -p /tmp/statusline-review` first. Include the round number in the filename so a later round
+cannot be mistaken for an earlier one.
+
+Reviewers deliver by **writing the report to that file**, because a subagent's final message does
+not reliably reach the caller here. Read the files rather than waiting on messages.
+
+**An absent file is not a clean review.** If a reviewer finishes without writing one, treat it as
+a failed round for that reviewer: stop it, spawn a replacement with the same prompt, and say so in
+the PR summary if it happens twice. Never record a missing report as「問題なし」.
+
+### 4b. Collect the reports, stop the reviewers, then merge
+
+Read both report files:
+
+```bash
+ls -l /tmp/statusline-review/r<周番号>-*.md
+```
 
 **As soon as both reports are in hand, stop both agents.**
 

@@ -70,7 +70,31 @@ explicitly as 未検証 with the reason, or delete it. For security, an unverifi
 be worth reporting when the consequence is severe — but say plainly that you could not reproduce
 it, and do not inflate its severity to compensate.
 
-## Report
+## Deliver the report by writing it to a file
+
+**Your final message does not reliably reach the caller. The file does.** Write your complete
+report to disk before you finish — this is not optional. A security audit that never arrives is
+worse than none, because the caller may take the silence for a clean result.
+
+The caller gives you an output path. If it did not, use `/tmp/security-review-report.md`.
+
+```bash
+cat > <出力パス> <<'REPORT_EOF'
+（レポート全文）
+REPORT_EOF
+ls -l <出力パス>
+```
+
+Confirm the file exists with `ls -l` before you stop. Then return the same report as your final
+message as well — belt and braces, since the caller may read either.
+
+Write the report **once**, complete, at the end. Do not append findings as you go: a half-written
+file looks finished to whoever reads it, and the caller has no way to tell it was truncated.
+
+This is the one file you write outside a temporary directory of your own making. It is a report,
+not a change to the repository — never write anything else outside `mktemp -d`.
+
+## Report format
 
 Rank findings by severity, most severe first. Use the severities from chapter 3:
 **Critical** / **High** / **Medium** / **Low**. Only **High and above** trigger a fix, so be
@@ -99,6 +123,8 @@ End with the verification results you obtained:
 
 Chapter 7 lists what not to report. Cap **Low** at three items.
 
-**Silence is a valid result.** If you found nothing, say「問題なし」in one line, add the
-verification results, and stop. Do not manufacture a finding to look thorough — a fabricated
-Medium costs the same review time as a real one and teaches the reader to skim your output.
+**Silence is a valid result.** If you found nothing, write「問題なし」in one line, add the
+verification results, and stop — **but still write the file.** Do not manufacture a finding to
+look thorough: a fabricated Medium costs the same review time as a real one and teaches the reader
+to skim your output. An absent file, on the other hand, is indistinguishable from a crash, and the
+caller must not read a crash as a clean audit.

@@ -50,7 +50,28 @@ explicitly as 未検証 with the reason you could not check it, or delete it. De
 
 **Never run the CLI against the real `~/.claude/settings.json`.** Use `HOME=$(mktemp -d)`.
 
-## Report
+## Deliver the report by writing it to a file
+
+**Your final message does not reliably reach the caller. The file does.** Write your complete
+report to disk before you finish — this is not optional, and a review that never arrives is worth
+nothing no matter how good it was.
+
+The caller gives you an output path. If it did not, use `/tmp/quality-review-report.md`.
+
+```bash
+cat > <出力パス> <<'REPORT_EOF'
+（レポート全文）
+REPORT_EOF
+ls -l <出力パス>
+```
+
+Confirm the file exists with `ls -l` before you stop. Then return the same report as your final
+message as well — belt and braces, since the caller may read either.
+
+Write the report **once**, complete, at the end. Do not append findings as you go: a half-written
+file looks finished to whoever reads it, and the caller has no way to tell it was truncated.
+
+## Report format
 
 Rank findings by severity, most severe first. Use the severities from chapter 3:
 **Blocker** / **Should fix** / **Consider**.
@@ -81,5 +102,6 @@ comment rather than placeholders:
 Chapter 7 lists what not to report. Respect it — those items produce the same noise every run.
 Cap **Consider** at three items; more than that means you are padding.
 
-**Silence is a valid result.** If the change is clean, say「問題なし」in one line, add the
-verification results, and stop.
+**Silence is a valid result.** If the change is clean, write「問題なし」in one line, add the
+verification results, and stop — **but still write the file.** "No findings" is a result the
+caller needs in order to close the round; an absent file is indistinguishable from a crash.
