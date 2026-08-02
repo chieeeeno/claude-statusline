@@ -164,6 +164,20 @@ class TestLineLocation(unittest.TestCase):
         d["workspace"]["git_worktree"] = "w" * 40
         self.assertIn("w" * 31 + "…", plain(sl.line_location(d, True)))
 
+    def test_git内でworkspaceがなくてもcwdから名前を取る(self):
+        self.assertEqual(
+            plain(sl.line_location({"cwd": "/tmp/some-repo"}, True)),
+            "📁 some-repo",
+        )
+
+    def test_名前が取れなければ行ごと消える(self):
+        self.assertEqual(sl.line_location({}, True), "")
+        self.assertEqual(sl.line_location({}, False), "")
+
+    def test_名前が取れなくてもworktreeがあれば出す(self):
+        d = {"workspace": {"git_worktree": "wt"}}
+        self.assertEqual(plain(sl.line_location(d, True)), "⧉ wt")
+
 
 class TestLineSession(unittest.TestCase):
     def test_全項目を出す(self):

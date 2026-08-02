@@ -132,10 +132,11 @@ def line_location(d, in_git):
     name = ((ws.get("repo") or {}).get("name") or "").strip()
     if not name:
         if in_git:
-            name = Path(ws.get("project_dir") or ws.get("current_dir") or "").name
+            name = Path(ws.get("project_dir") or ws.get("current_dir") or d.get("cwd") or "").name
         else:
             name = shorten_home(ws.get("current_dir") or d.get("cwd") or "")
-    parts = [f"📁 {YELLOW}{name}{RESET}"]
+    # 名前が取れないときはセグメントごと出さない。データのない枠を描かないため
+    parts = [f"📁 {YELLOW}{name}{RESET}"] if name else []
     worktree = ws.get("git_worktree")
     if worktree:
         parts.append(f"⧉ {YELLOW}{truncate(worktree, 32)}{RESET}")

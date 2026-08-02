@@ -16,6 +16,21 @@ function packageVersion() {
 }
 
 /**
+ * シェルに安全に渡せる形に引用する。
+ *
+ * settings.json の command はシェル経由で実行されるため、引用せずにパスを
+ * 連結すると、空白を含む設置先（iCloud Drive や Google Drive の配下など）で
+ * 描画が壊れ、シェルメタ文字を含むディレクトリ名では任意コマンドが毎分
+ * 実行される。単一引用で包み、内部の ' は閉じて連結し直す。
+ *
+ * @param {string} s 引用する文字列
+ * @returns {string} 単一引用で包まれた文字列
+ */
+function shellQuote(s) {
+  return `'${String(s).replace(/'/g, "'\\''")}'`;
+}
+
+/**
  * 指定した python 実行ファイルのバージョンと実体パスを調べる。
  * @param {string} bin python の実行ファイル名またはパス
  * @returns {{major: number, minor: number, executable: string}|null} 実行できなければ null
@@ -97,7 +112,9 @@ function install({ runcat }) {
 
   settings.statusLine = {
     type: "command",
-    command: `${runcat ? "CLAUDE_STATUSLINE_RUNCAT=1 " : ""}${python} ${SCRIPT}`,
+    command:
+      (runcat ? "CLAUDE_STATUSLINE_RUNCAT=1 " : "") +
+      `${shellQuote(python)} ${shellQuote(SCRIPT)}`,
     refreshInterval: 60,
   };
   writeSettings(settings);
@@ -114,8 +131,11 @@ function uninstall() {
     console.log("claude-statusline: nothing to uninstall (no statusLine entry).");
     return;
   }
-  // 他のツールが設定した status line を消さない
-  if (!String(settings.statusLine.command || "").includes(SCRIPT)) {
+  // 他のツールが設定した status line を消さない。
+  // 引用ありの新形式と、引用なしで書かれた旧バージョンの設定の両方を認識する。
+  // パスに ' を含む場合は引用時にエスケープされ、生のパスでは一致しないため。
+  const current = String(settings.statusLine.command || "");
+  if (!current.includes(SCRIPT) && !current.includes(shellQuote(SCRIPT))) {
     console.error("claude-statusline: statusLine points to a different program; leaving it alone.");
     console.error(`  current: ${settings.statusLine.command}`);
     process.exit(1);
