@@ -76,7 +76,24 @@ Give each the same input: the base ref, the head ref, and the list of changed fi
 round number. Do not pass along your own opinion of the code — you wrote it, and seeding them with
 your reasoning defeats the point of reviewing in a separate context.
 
-### 4b. Merge the findings
+### 4b. Stop the reviewers, then merge
+
+**As soon as both reports are in hand, stop both agents.**
+
+```bash
+# TaskStop で各エージェントを名前指定して停止する
+```
+
+A reviewer that has delivered its report has nothing left to do, but it stays resident and keeps
+emitting idle notifications. Leaving them running across three rounds accumulates agents that all
+answer to similar names, and the next round's reports get harder to tell apart. Each round spawns
+fresh reviewers — that is deliberate, so a round's findings are never coloured by what the agent
+concluded last time.
+
+Stop them **after** you have the reports, never before. Stopping an agent mid-audit loses its work
+silently, and you will not know what it was about to find.
+
+### Merge the findings
 
 - Deduplicate by `file:line`. If both agents report the same location, keep the security framing —
   it carries the attack path
