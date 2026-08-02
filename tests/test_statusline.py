@@ -1,9 +1,11 @@
 """statusline.py のユニットテスト（/usr/bin/python3 の標準 unittest で実行）。"""
 
+import os
 import re
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -239,6 +241,20 @@ class TestLineMeters(unittest.TestCase):
         d = payload()
         d["context_window"]["used_percentage"] = 95
         self.assertIn("\033[1;38;5;203m", sl.line_meters(d, 1999992620.0))
+
+
+class TestRuncatEnabled(unittest.TestCase):
+    def test_環境変数がなければ無効(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(sl.runcat_enabled())
+
+    def test_環境変数があれば有効(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_STATUSLINE_RUNCAT": "1"}):
+            self.assertTrue(sl.runcat_enabled())
+
+    def test_空文字は無効(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_STATUSLINE_RUNCAT": ""}):
+            self.assertFalse(sl.runcat_enabled())
 
 
 if __name__ == "__main__":

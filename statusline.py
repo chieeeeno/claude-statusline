@@ -1,8 +1,9 @@
 #!/usr/bin/python3
 """Claude Code status line。
 
-stdin で受け取った status line ペイロード(JSON)から 3 行を組み立てて stdout に出力し、
-副作用として ~/.claude/runcat-usage.json (RunCat Neo 連携) を更新する。
+stdin で受け取った status line ペイロード(JSON)から 3 行を組み立てて stdout に出力する。
+CLAUDE_STATUSLINE_RUNCAT が設定されている場合のみ ~/.claude/runcat-usage.json
+(RunCat Neo 連携) を更新する。
 
 shebang を /usr/bin/python3 に固定しているのは、/usr/bin/env 経由だと PATH 上の
 pyenv shim を掴んでしまい、1 描画あたり 60ms 以上を余計に消費するため。
@@ -250,6 +251,16 @@ def git_branch(cwd):
     return None
 
 
+def runcat_enabled():
+    """RunCat Neo 連携を有効にするかどうか。
+
+    作者環境固有の連携なので既定は無効。利用者が明示的に有効化したときだけ書き出す。
+
+    @returns 環境変数 CLAUDE_STATUSLINE_RUNCAT が空でない値で設定されていれば True
+    """
+    return bool(os.environ.get("CLAUDE_STATUSLINE_RUNCAT"))
+
+
 def write_runcat(d):
     """RunCat Neo が読む使用量スナップショットを書き出す。
 
@@ -301,10 +312,11 @@ def main():
         payload = {}
 
     # RunCat 連携が壊れても status line 自体は描画する
-    try:
-        write_runcat(payload)
-    except OSError as e:
-        print(f"statusline: runcat-usage.json の更新に失敗しました: {e}", file=sys.stderr)
+    if runcat_enabled():
+        try:
+            write_runcat(payload)
+        except OSError as e:
+            print(f"statusline: failed to update runcat-usage.json: {e}", file=sys.stderr)
 
     workspace = payload.get("workspace") or {}
     branch = git_branch(workspace.get("current_dir") or payload.get("cwd"))
