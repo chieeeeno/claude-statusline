@@ -340,11 +340,13 @@ def main():
     if not isinstance(payload, dict):
         payload = {}
 
-    # RunCat 連携が壊れても status line 自体は描画する
+    # RunCat 連携が壊れても status line 自体は描画する。OSError だけでは足りない。
+    # ペイロードの型が想定と違えば ValueError や AttributeError が飛び、
+    # それを通すと --runcat を有効にした利用者だけが 3 行とも失う
     if runcat_enabled():
         try:
             write_runcat(payload)
-        except OSError as e:
+        except Exception as e:
             print(f"statusline: failed to update runcat-usage.json: {e}", file=sys.stderr)
 
     workspace = payload.get("workspace") or {}

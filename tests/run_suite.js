@@ -6,6 +6,9 @@
  * node --test は 1 件も収集できなくても exit 0 を返す（テストファイルを
  * 空にすると再現する）。テストの失敗と「テストが無い」ことを、どちらも
  * exit 1 に揃えるための包み。
+ *
+ * ファイルを名指しせず列挙するのは、逆向きの穴を開けないため。名指しにすると
+ * tests/ にテストを足しても走らず、落ちるテストを追加したのに CI が緑になる。
  */
 
 const fs = require("node:fs");
@@ -13,8 +16,17 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
-const FILE = path.join(__dirname, "cli.test.js");
+const FILES = fs
+  .readdirSync(__dirname)
+  .filter((f) => f.endsWith(".test.js"))
+  .sort()
+  .map((f) => path.join(__dirname, f));
 const MINIMUM = 30;
+
+if (FILES.length === 0) {
+  console.error("claude-statusline: no *.test.js files found in tests/");
+  process.exit(1);
+}
 
 const tapDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-statusline-tap-"));
 const tapFile = path.join(tapDir, "out.tap");
@@ -29,7 +41,7 @@ const result = spawnSync(
     "--test-reporter-destination=stdout",
     "--test-reporter=tap",
     `--test-reporter-destination=${tapFile}`,
-    FILE,
+    ...FILES,
   ],
   { stdio: "inherit" }
 );

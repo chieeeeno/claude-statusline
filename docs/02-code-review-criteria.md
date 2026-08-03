@@ -128,16 +128,23 @@ git のツリーエントリは `/` と NUL 以外の任意バイトを許すた
 検証は `npm run test:py`（`TestSanitize` と `line_location` / `line_session` の制御文字テスト）と、次の実行:
 
 ```bash
-printf '{"workspace":{"current_dir":"/tmp/a\\u001b]52;c;cHdu\\u0007b"}}' | python3 statusline.py | cat -v
+printf '{"workspace":{"current_dir":"/tmp/a\\u001b]52;c;cHdu\\u0007b"}}' \
+  | python3 statusline.py | perl -pe 's/\e\[[0-9;]*m//g' | cat -v
 ```
 
-出力に `^[` や `^G` が現れたら違反。
+**自前の色指定（`ESC [ ... m`）を先に落としてから見る。** `statusline.py` は必ず色を出すので、素の出力には `^[` が常に現れる。それを違反とみなすと、正しい実装に対しても毎回 Blocker がでっち上がる。第 8 章のとおり、偽陽性を生む検証手段は観点そのものを無効にする。
+
+色を落とした残りに `^[` や `^G` が現れたら違反。
 
 ### 4.12 テストの不在を成功にしない
 
 `unittest` も `node --test` も、テストを 1 件も収集できないまま exit 0 を返す（テストファイルを空にすると再現する）。`tests/run_suite.py` と `tests/run_suite.js` が件数の下限を見ているのはこのため。
 
 **下限を下げる差分、およびこの包みを外して素の `unittest` / `node --test` に戻す差分は Blocker。** テストの削除が緑の CI として通る状態に戻る。
+
+包みは**追加方向にも効かなければならない。** モジュールやファイルを名指しで実行すると、`tests/` にテストを足してもそれが走らず、落ちるテストを追加したのに CI が緑になる。件数の下限は名指ししたファイルの中しか数えないため、ここでは捕まらない。`run_suite.py` は `discover`、`run_suite.js` は `*.test.js` の列挙を使う。**名指しに戻す差分は Blocker。**
+
+検証は、必ず落ちるテストファイルを `tests/` に 1 本足して `npm test` を実行する。exit 0 なら違反。
 
 ## 5. セキュリティ観点（security-reviewer 担当）
 

@@ -504,6 +504,23 @@ class TestMain(RuncatCase):
         run_main(json.dumps(payload()), HOME=str(self.home), CLAUDE_STATUSLINE_RUNCAT="1")
         self.assertEqual(self.snapshot()["title"], "Claude Code")
 
+    def test_RUNCAT書き出しが型例外で落ちても描画は返る(self):
+        # OSError しか捕まえていないと、--runcat を有効にした利用者だけが
+        # スキーマ外のペイロードで 3 行とも失う
+        raw = '{"cwd":"/tmp/some-repo","model":{"display_name":"Opus 5"},' \
+              '"context_window":{"used_percentage":"25"}}'
+        out, err = run_main(raw, HOME=str(self.home), CLAUDE_STATUSLINE_RUNCAT="1")
+        self.assertIn("some-repo", plain(out))
+        self.assertIn("Opus 5", plain(out))
+        self.assertIn("runcat-usage.json", err)
+        self.assertFalse(self.out.exists())
+
+    def test_RUNCAT書き出しが属性例外で落ちても描画は返る(self):
+        raw = '{"cwd":"/tmp/some-repo","model":"Opus 5"}'
+        out, err = run_main(raw, HOME=str(self.home), CLAUDE_STATUSLINE_RUNCAT="1")
+        self.assertIn("some-repo", plain(out))
+        self.assertIn("runcat-usage.json", err)
+
 
 if __name__ == "__main__":
     unittest.main()
