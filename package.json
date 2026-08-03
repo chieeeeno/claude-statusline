@@ -1,6 +1,6 @@
 {
   "name": "@chieeeeno/claude-statusline",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A fast, dependency-free status line for Claude Code. Shows context, rate limits, and cost. Renders in Python - no Node at render time.",
   "bin": { "claude-statusline": "bin/claude-statusline.js" },
   "files": ["bin/", "statusline.py", "README.md", "LICENSE"],
