@@ -332,6 +332,16 @@ class TestLineMeters(unittest.TestCase):
         d["context_window"]["used_percentage"] = 95
         self.assertIn("\033[1;38;5;203m", sl.line_meters(d, 1999992620.0))
 
+    def test_増減行数の制御文字を落とす(self):
+        # 3 行目で唯一、書式指定を挟まずに補間される値
+        d = payload()
+        d["cost"]["total_lines_added"] = "1\033]52;c;cHdu\007"
+        d["cost"]["total_lines_removed"] = 2
+        out = sl.line_meters(d, 1999992620.0)
+        self.assertNotIn("\033]52", out)
+        self.assertNotIn("\007", out)
+        self.assertIn("+1]52;c;cHdu/-2", plain(out))
+
 
 class TestRuncatEnabled(unittest.TestCase):
     def test_環境変数がなければ無効(self):

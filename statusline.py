@@ -248,7 +248,10 @@ def line_meters(d, now):
     added = cost.get("total_lines_added") or 0
     removed = cost.get("total_lines_removed") or 0
     if added or removed:
-        bits.append(f"+{added}/-{removed}")
+        # この行で唯一、書式指定も算術演算も挟まない補間。他の値は :.0f や
+        # fmt_tokens の比較が型を強制するので文字列は例外になって行ごと退避するが、
+        # ここだけは素通りする。4.11 の一律規則どおり sanitize を通す
+        bits.append(sanitize(f"+{added}/-{removed}"))
     if bits:
         segs.append(f"💰 {GRAY}{' · '.join(bits)}{RESET}")
 
