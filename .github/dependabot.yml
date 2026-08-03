@@ -1,0 +1,15 @@
+version: 2
+
+# Action は可変タグではなく commit SHA で参照している。乗っ取られたタグが
+# 貼り替えられてもランナー上で他人のコードが走らない代わりに、更新が止まる。
+# SHA の追従はここに任せる。
+#
+# npm エコシステムは対象にしない。dependencies も devDependencies も空で、
+# テストは Node と Python の組み込み機能だけで回しているため。
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci

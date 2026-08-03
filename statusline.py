@@ -108,14 +108,36 @@ def truncate(s, limit):
     return s if len(s) <= limit else s[: limit - 1] + "…"
 
 
+def sanitize(s):
+    """表示用文字列から端末制御文字を落とす。
+
+    git のツリーエントリは / と NUL 以外の任意バイトを許すため、細工した
+    リポジトリのディレクトリ名や worktree 名に OSC 52（クリップボード書き込み）や
+    CSI（画面消去）を仕込める。status line は 60 秒ごとに描画されるので、
+    そのまま流すと制御シーケンスが繰り返し端末に届く。
+
+    表示に使う文字列は、ペイロード由来か外部コマンド由来かを問わず全部ここを通す。
+    「どれが安全か」の判断を残すと、後から足した項目で漏れる。
+
+    @param s 対象文字列
+    @returns 印字可能な文字だけを残した文字列
+    """
+    return "".join(c for c in s if c.isprintable())
+
+
 def shorten_home(path):
     """ホームディレクトリを ~ に置き換える。
+
+    区切り文字まで見るのは、ホーム名を接頭辞に持つ別ディレクトリ
+    （/Users/foo に対する /Users/foo2/x）を誤って短縮しないため。
 
     @param path 絶対パス
     @returns ~ 短縮したパス
     """
     home = str(Path.home())
-    return "~" + path[len(home):] if path.startswith(home) else path
+    if path == home or path.startswith(home + os.sep):
+        return "~" + path[len(home):]
+    return path
 
 
 def line_location(d, in_git):
@@ -135,9 +157,11 @@ def line_location(d, in_git):
             name = Path(ws.get("project_dir") or ws.get("current_dir") or d.get("cwd") or "").name
         else:
             name = shorten_home(ws.get("current_dir") or d.get("cwd") or "")
+    # 切り詰めより先にサニタイズする。落とした制御文字が表示幅を食わないように
+    name = sanitize(name)
     # 名前が取れないときはセグメントごと出さない。データのない枠を描かないため
     parts = [f"📁 {YELLOW}{name}{RESET}"] if name else []
-    worktree = ws.get("git_worktree")
+    worktree = sanitize(ws.get("git_worktree") or "")
     if worktree:
         parts.append(f"⧉ {YELLOW}{truncate(worktree, 32)}{RESET}")
     return "  ".join(parts)
@@ -151,15 +175,16 @@ def line_session(d, branch):
     @returns 2 行目の文字列
     """
     parts = []
+    branch = sanitize(branch or "")
     if branch:
         parts.append(f"⑂ {GREEN}{truncate(branch, 40)}{RESET}")
-    model = ((d.get("model") or {}).get("display_name") or "").replace(" context)", ")")
+    model = sanitize(((d.get("model") or {}).get("display_name") or "").replace(" context)", ")"))
     if model:
         parts.append(f"🧠 {BLUE}{model}{RESET}")
-    effort = (d.get("effort") or {}).get("level")
+    effort = sanitize((d.get("effort") or {}).get("level") or "")
     if effort:
         parts.append(f"⚡ {GRAY}{effort}{RESET}")
-    style = (d.get("output_style") or {}).get("name")
+    style = sanitize((d.get("output_style") or {}).get("name") or "")
     if style and style != "default":
         parts.append(f"📖 {GRAY}{style}{RESET}")
     if (d.get("thinking") or {}).get("enabled"):
@@ -223,7 +248,10 @@ def line_meters(d, now):
     added = cost.get("total_lines_added") or 0
     removed = cost.get("total_lines_removed") or 0
     if added or removed:
-        bits.append(f"+{added}/-{removed}")
+        # この行で唯一、書式指定も算術演算も挟まない補間。他の値は :.0f や
+        # fmt_tokens の比較が型を強制するので文字列は例外になって行ごと退避するが、
+        # ここだけは素通りする。4.11 の一律規則どおり sanitize を通す
+        bits.append(sanitize(f"+{added}/-{removed}"))
     if bits:
         segs.append(f"💰 {GRAY}{' · '.join(bits)}{RESET}")
 
@@ -269,7 +297,7 @@ def write_runcat(d):
 
     @param d status line ペイロード
     """
-    out = Path(os.environ.get("RUNCAT_OUT_FILE") or Path.home() / ".claude" / "runcat-usage.json")
+    out = Path.home() / ".claude" / "runcat-usage.json"
     ctx = (d.get("context_window") or {}).get("used_percentage")
     rate_limits = d.get("rate_limits") or {}
 
@@ -312,22 +340,36 @@ def main():
     if not isinstance(payload, dict):
         payload = {}
 
-    # RunCat 連携が壊れても status line 自体は描画する
+    # RunCat 連携が壊れても status line 自体は描画する。OSError だけでは足りない。
+    # ペイロードの型が想定と違えば ValueError や AttributeError が飛び、
+    # それを通すと --runcat を有効にした利用者だけが 3 行とも失う
     if runcat_enabled():
         try:
             write_runcat(payload)
-        except OSError as e:
+        except Exception as e:
             print(f"statusline: failed to update runcat-usage.json: {e}", file=sys.stderr)
 
     workspace = payload.get("workspace") or {}
-    branch = git_branch(workspace.get("current_dir") or payload.get("cwd"))
+    # git_branch は OSError と SubprocessError しか見ない。current_dir が
+    # 文字列でなければ subprocess.run が TypeError を投げてそこを素通りする
+    try:
+        branch = git_branch(workspace.get("current_dir") or payload.get("cwd"))
+    except Exception:
+        branch = None
     now = time.time()
 
-    for line in (
-        line_location(payload, branch is not None),
-        line_session(payload, branch),
-        line_meters(payload, now),
+    # 行ごとに独立して捕まえる。ペイロードのスキーマは Claude Code 側の都合で
+    # 変わりうるので、1 行が型例外で落ちても残りの行は出す
+    for build in (
+        lambda: line_location(payload, branch is not None),
+        lambda: line_session(payload, branch),
+        lambda: line_meters(payload, now),
     ):
+        try:
+            line = build()
+        except Exception as e:
+            print(f"statusline: 行の描画に失敗しました: {e}", file=sys.stderr)
+            continue
         if line:
             print(line)
 

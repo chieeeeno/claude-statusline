@@ -32,22 +32,59 @@ function shellQuote(s) {
 
 /**
  * 指定した python 実行ファイルのバージョンと実体パスを調べる。
+ *
+ * 版数が整数 2 つに解析できなければ null を返す。Number() は解析不能な出力に
+ * NaN を返し、NaN はどの比較でも false になるため、素通しにすると最低版数の
+ * 検査そのものが無効化される。
+ *
  * @param {string} bin python の実行ファイル名またはパス
  * @returns {{major: number, minor: number, executable: string}|null} 実行できなければ null
  */
 function inspectPython(bin) {
+  let out;
   try {
-    const out = execFileSync(
+    out = execFileSync(
       bin,
       ["-c", "import sys; print('%d.%d' % sys.version_info[:2]); print(sys.executable)"],
       { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }
     );
-    const [version, executable] = out.trim().split("\n");
-    const [major, minor] = version.split(".").map(Number);
-    return { major, minor, executable };
   } catch {
     return null;
   }
+  const [version, executable] = out.trim().split("\n");
+  const [major, minor] = String(version || "").split(".").map(Number);
+  if (!Number.isInteger(major) || !Number.isInteger(minor)) return null;
+  return { major, minor, executable: String(executable || "").trim() };
+}
+
+/**
+ * 最低サポート版数を満たすか。
+ * @param {{major: number, minor: number}|null} info inspectPython の戻り値
+ * @returns {boolean}
+ */
+function meetsMinimum(info) {
+  if (!info) return false;
+  if (info.major !== MIN_PYTHON.major) return info.major > MIN_PYTHON.major;
+  return info.minor >= MIN_PYTHON.minor;
+}
+
+/**
+ * inspectPython が報告した sys.executable を採用してよいか確かめる。
+ *
+ * この値は被検査プログラムが 2 行目に印字した文字列にすぎず、そのまま採用すると
+ * 任意のパスが settings.json に焼かれて毎分実行される。絶対パスであることに加え、
+ * そのパス自身を実行して同じ版数を名乗ることまで確かめる。
+ *
+ * @param {{major: number, minor: number, executable: string}} info inspectPython の戻り値
+ * @returns {string|null} 検証を通った実体パス。通らなければ null
+ */
+function verifiedExecutable(info) {
+  const exe = info.executable;
+  if (!exe || !path.isAbsolute(exe)) return null;
+  const confirmed = inspectPython(exe);
+  if (!confirmed) return null;
+  if (confirmed.major !== info.major || confirmed.minor !== info.minor) return null;
+  return exe;
 }
 
 /**
@@ -62,20 +99,43 @@ function inspectPython(bin) {
 function resolvePython() {
   for (const candidate of ["/usr/bin/python3", "python3"]) {
     const info = inspectPython(candidate);
-    if (!info) continue;
-    if (info.major < MIN_PYTHON.major) continue;
-    if (info.major === MIN_PYTHON.major && info.minor < MIN_PYTHON.minor) continue;
-    // shim 経由で呼ばれても sys.executable は実体を返すため、それを採用する
-    return candidate === "/usr/bin/python3" ? candidate : info.executable;
+    if (!meetsMinimum(info)) continue;
+    // 絶対パスの候補は実行できた時点で確定。それ以外は PATH 由来なので、
+    // shim の実体を返す sys.executable を検証したうえで採用する
+    if (path.isAbsolute(candidate)) return candidate;
+    const executable = verifiedExecutable(info);
+    if (executable) return executable;
   }
   return null;
 }
 
-function requirePython() {
+/**
+ * --python で明示指定されたインタプリタを検証する。
+ * @param {string} value 利用者が渡したパス
+ * @returns {string} 検証を通った絶対パス
+ */
+function explicitPython(value) {
+  const target = path.resolve(value);
+  const info = inspectPython(target);
+  if (!info) {
+    console.error(`claude-statusline: ${target} could not be run as a Python interpreter.`);
+    process.exit(1);
+  }
+  if (!meetsMinimum(info)) {
+    console.error(
+      `claude-statusline: ${target} is Python ${info.major}.${info.minor}, but 3.8 or newer is required.`
+    );
+    process.exit(1);
+  }
+  return target;
+}
+
+function requirePython(explicit) {
+  if (explicit) return explicitPython(explicit);
   const python = resolvePython();
   if (python) return python;
   console.error("claude-statusline: Python 3.8 or newer was not found.");
-  console.error("  Install python3 and run this command again.");
+  console.error("  Install python3, or point at one with --python <path>.");
   process.exit(1);
 }
 
@@ -83,13 +143,23 @@ function readSettings() {
   if (!fs.existsSync(SETTINGS)) return {};
   const raw = fs.readFileSync(SETTINGS, "utf8");
   if (!raw.trim()) return {};
+  let parsed;
   try {
-    return JSON.parse(raw);
+    parsed = JSON.parse(raw);
   } catch (e) {
     console.error(`claude-statusline: ${SETTINGS} is not valid JSON: ${e.message}`);
     console.error("  Fix the file manually and try again.");
     process.exit(1);
   }
+  // パースは通るがオブジェクトではない場合。配列に statusLine を足しても
+  // JSON.stringify が名前付きプロパティを落とすため、成功を報告しながら
+  // 設定が入っていないという最悪の結果になる。null や文字列は TypeError になる
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    console.error(`claude-statusline: ${SETTINGS} is not a JSON object.`);
+    console.error("  Fix the file manually and try again.");
+    process.exit(1);
+  }
+  return parsed;
 }
 
 function backupSettings() {
@@ -100,13 +170,19 @@ function backupSettings() {
   return dest;
 }
 
+// settings.json には env.ANTHROPIC_API_KEY のような機微な設定が入りうる。
+// umask 任せだと共有ホストで他ローカルユーザーから読める 0644 で作られる。
+// mode は新規作成時にしか効かないため、既存ファイルのモードは変えない。
 function writeSettings(settings) {
-  fs.mkdirSync(path.dirname(SETTINGS), { recursive: true });
-  fs.writeFileSync(SETTINGS, JSON.stringify(settings, null, 2) + "\n", "utf8");
+  fs.mkdirSync(path.dirname(SETTINGS), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(SETTINGS, JSON.stringify(settings, null, 2) + "\n", {
+    encoding: "utf8",
+    mode: 0o600,
+  });
 }
 
-function install({ runcat }) {
-  const python = requirePython();
+function install({ runcat, python: explicit }) {
+  const python = requirePython(explicit);
   const settings = readSettings();
   const backup = backupSettings();
 
@@ -147,8 +223,8 @@ function uninstall() {
   console.log(`Removed status line from ${SETTINGS}`);
 }
 
-function print() {
-  const python = requirePython();
+function print(explicit) {
+  const python = requirePython(explicit);
   const result = spawnSync(python, [SCRIPT], { stdio: "inherit" });
   process.exit(result.status === null ? 1 : result.status);
 }
@@ -162,7 +238,8 @@ function usage() {
   claude-statusline --version             Print the version
   claude-statusline --help                Show this message
 
-  --runcat enables writing ~/.claude/runcat-usage.json for RunCat Neo (off by default).`);
+  --runcat enables writing ~/.claude/runcat-usage.json for RunCat Neo (off by default).
+  --python <path> pins the interpreter instead of looking for /usr/bin/python3 or one on PATH.`);
 }
 
 const KNOWN_FLAGS = new Set([
@@ -174,20 +251,60 @@ const KNOWN_FLAGS = new Set([
   "--runcat",
 ]);
 
-const args = process.argv.slice(2);
-const has = (flag) => args.includes(flag);
+const PYTHON_FLAG = "--python";
 
-// 打ち間違えたフラグを usage + exit 0 で返すと、`cmd && next` で繋いだ
-// セットアップスクリプトが成功と判断して先へ進んでしまう。
-const unknown = args.filter((a) => !KNOWN_FLAGS.has(a));
-if (unknown.length) {
-  console.error(`claude-statusline: unknown option: ${unknown.join(", ")}`);
-  console.error("  Run claude-statusline --help to see the available options.");
-  process.exit(1);
+/**
+ * コマンドラインを 1 パスで読む。
+ *
+ * --python の値をフラグ検査から除くために、includes() ではなく走査で解く。
+ *
+ * @param {string[]} argv process.argv.slice(2)
+ * @returns {{flags: Set<string>, python: string|null, unknown: string[]}}
+ */
+function parseArgs(argv) {
+  const flags = new Set();
+  const unknown = [];
+  let python = null;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === PYTHON_FLAG || arg.startsWith(`${PYTHON_FLAG}=`)) {
+      // 値を取り違えると、その文字列がインタプリタとして settings.json に焼かれる。
+      // 空や別のフラグを黙って受けない
+      const value = arg === PYTHON_FLAG ? argv[++i] : arg.slice(PYTHON_FLAG.length + 1);
+      if (!value || value.startsWith("-")) {
+        console.error(`claude-statusline: ${PYTHON_FLAG} requires a path to a Python interpreter.`);
+        console.error(`  example: claude-statusline --install ${PYTHON_FLAG} /opt/homebrew/bin/python3`);
+        process.exit(1);
+      }
+      python = value;
+      continue;
+    }
+    if (KNOWN_FLAGS.has(arg)) flags.add(arg);
+    else unknown.push(arg);
+  }
+  return { flags, python, unknown };
 }
 
-if (has("--version")) console.log(packageVersion());
-else if (has("--install")) install({ runcat: has("--runcat") });
-else if (has("--uninstall")) uninstall();
-else if (has("--print")) print();
-else usage();
+function run(argv) {
+  const { flags, python, unknown } = parseArgs(argv);
+  const has = (flag) => flags.has(flag);
+
+  // 打ち間違えたフラグを usage + exit 0 で返すと、`cmd && next` で繋いだ
+  // セットアップスクリプトが成功と判断して先へ進んでしまう。
+  if (unknown.length) {
+    console.error(`claude-statusline: unknown option: ${unknown.join(", ")}`);
+    console.error("  Run claude-statusline --help to see the available options.");
+    process.exit(1);
+  }
+
+  if (has("--version")) console.log(packageVersion());
+  else if (has("--install")) install({ runcat: has("--runcat"), python });
+  else if (has("--uninstall")) uninstall();
+  else if (has("--print")) print(python);
+  else usage();
+}
+
+if (require.main === module) run(process.argv.slice(2));
+// インタプリタ解決はサブプロセス越しには通せない分岐を持つ（/usr/bin/python3 が
+// 在る環境では PATH 由来の候補に到達しない）。テストから直に呼べるようにしておく。
+else module.exports = { inspectPython, meetsMinimum, verifiedExecutable, resolvePython, parseArgs };
