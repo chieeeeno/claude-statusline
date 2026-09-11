@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -88,44 +89,58 @@ class TestFmtTokens(unittest.TestCase):
         self.assertEqual(sl.fmt_tokens(1500000), "1.5M")
 
 
-class TestFmtReset(unittest.TestCase):
-    def test_残り時間の単位を切り替える(self):
-        now = 1000000.0
-        self.assertEqual(sl.fmt_reset(now + 2820, now), "47m")
-        self.assertEqual(sl.fmt_reset(now + 7380, now), "2:03")
-        self.assertEqual(sl.fmt_reset(now + 432000, now), "5d")
+class TestResetWindow(TZFixture, unittest.TestCase):
+    """表示してよい resets_at かどうかの判定は、ここ 1 か所に集約されている。"""
+
+    # JST では 1999992620 = 2033-05-18 10:30:20
+    NOW = 1999992620.0
+
+    def test_残り秒数とローカル時刻を組で返す(self):
+        sec, at = sl.reset_window(self.NOW + 7380, self.NOW)
+        self.assertEqual(sec, 7380)
+        self.assertEqual(at.strftime("%Y-%m-%d %H:%M"), "2033-05-18 12:33")
 
     def test_過去や欠損ではNoneを返す(self):
-        now = 1000000.0
-        self.assertIsNone(sl.fmt_reset(now - 1, now))
-        self.assertIsNone(sl.fmt_reset(now, now))
-        self.assertIsNone(sl.fmt_reset(None, now))
+        self.assertIsNone(sl.reset_window(self.NOW - 1, self.NOW))
+        self.assertIsNone(sl.reset_window(self.NOW, self.NOW))
+        self.assertIsNone(sl.reset_window(None, self.NOW))
+        self.assertIsNone(sl.reset_window(0, self.NOW))
+
+    def test_秒ではなくミリ秒が来たらNoneを返す(self):
+        # 秒として読むと西暦 5 万年台。残り時間に素通しすると ↺20687238d という
+        # 19 桁の無意味な表示になるため、時刻ごと出さない
+        self.assertIsNone(sl.reset_window(1789166552000, self.NOW))
+
+    def test_datetimeにできない値ではNoneを返す(self):
+        for bad in (1e20, float("inf"), float("-inf"), float("nan"), "2033-05-18", [1]):
+            self.assertIsNone(sl.reset_window(bad, self.NOW), repr(bad))
+
+
+class TestFmtReset(unittest.TestCase):
+    def test_残り時間の単位を切り替える(self):
+        self.assertEqual(sl.fmt_reset(2820), "47m")
+        self.assertEqual(sl.fmt_reset(7380), "2:03")
+        self.assertEqual(sl.fmt_reset(432000), "5d")
 
 
 class TestFmtResetAt(TZFixture, unittest.TestCase):
     # JST では 1999992620 = 2033-05-18 10:30:20
     NOW = 1999992620.0
 
+    def at(self, offset):
+        return datetime.fromtimestamp(self.NOW + offset)
+
     def test_同じ日なら時刻だけを返す(self):
         # +7380 秒 → 同日 12:33
-        self.assertEqual(sl.fmt_reset_at(self.NOW + 7380, self.NOW), "12:33")
+        self.assertEqual(sl.fmt_reset_at(self.at(7380), self.NOW), "12:33")
 
     def test_暦日が変われば24時間以内でも日付を付ける(self):
         # +80980 秒（22.5 時間）→ 翌日 05/19 09:00
-        self.assertEqual(sl.fmt_reset_at(self.NOW + 80980, self.NOW), "5/19 09:00")
+        self.assertEqual(sl.fmt_reset_at(self.at(80980), self.NOW), "5/19 09:00")
 
     def test_数日先なら日付を付ける(self):
         # +432000 秒（5 日）→ 05/23 10:30
-        self.assertEqual(sl.fmt_reset_at(self.NOW + 432000, self.NOW), "5/23 10:30")
-
-    def test_過去や欠損ではNoneを返す(self):
-        self.assertIsNone(sl.fmt_reset_at(self.NOW - 1, self.NOW))
-        self.assertIsNone(sl.fmt_reset_at(self.NOW, self.NOW))
-        self.assertIsNone(sl.fmt_reset_at(None, self.NOW))
-
-    def test_表現できないタイムスタンプではNoneを返す(self):
-        # fmt_reset は巨大な "d" を返して素通りするので、ここで落ちると 3 行目が丸ごと消える
-        self.assertIsNone(sl.fmt_reset_at(1e20, self.NOW))
+        self.assertEqual(sl.fmt_reset_at(self.at(432000), self.NOW), "5/23 10:30")
 
 
 class TestFmtElapsed(unittest.TestCase):
@@ -360,13 +375,24 @@ class TestLineMeters(TZFixture, unittest.TestCase):
         out = plain(sl.line_meters(payload(), 2000424621.0))
         self.assertNotIn("↺", out)
 
-    def test_リセット時刻が表現できなくても残り時間は出す(self):
+    def test_表現できない時刻は残り時間ごと消す(self):
+        # ミリ秒で渡された場合。↺20687238d のような無意味な表示を出さない
         d = payload()
-        d["rate_limits"]["five_hour"]["resets_at"] = 1e20
+        d["rate_limits"]["five_hour"]["resets_at"] = 1789166552000
         out = plain(sl.line_meters(d, 1999992620.0))
-        self.assertIn("🔥", out)
-        self.assertIn("↺", out)
-        self.assertTrue(out.endswith("+156/-23"))
+        five_hour = [seg for seg in out.split("│") if "🔥" in seg][0]
+        self.assertIn("5h", five_hour)
+        self.assertNotIn("↺", five_hour)
+        # 7d 側は健全なので残る
+        self.assertIn("↺5d (5/23 10:30)", out)
+
+    def test_無限大やNaNや文字列でも3行目は消えない(self):
+        for bad in (float("inf"), float("nan"), "2033-05-18", [1]):
+            d = payload()
+            d["rate_limits"]["five_hour"]["resets_at"] = bad
+            out = plain(sl.line_meters(d, 1999992620.0))
+            self.assertIn("🔥 5h", out, repr(bad))
+            self.assertTrue(out.endswith("+156/-23"), repr(bad))
 
     def test_200kモデルでは分母が200kになる(self):
         d = payload()
