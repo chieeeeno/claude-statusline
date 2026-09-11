@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -21,6 +22,29 @@ ANSI = re.compile(r"\033\[[0-9;]*m")
 def plain(s):
     """ANSI エスケープを除いた見た目の文字列を返す。"""
     return ANSI.sub("", s)
+
+
+class TZFixture:
+    """ローカルタイムゾーンを Asia/Tokyo に固定する mixin。
+
+    リセット時刻の表示はローカル時刻なので、固定 Unix 秒に対する期待値は
+    実行環境の TZ で変わる。CI（UTC）と手元（JST）で同じ結果を得るために固定する。
+    """
+
+    def setUp(self):
+        saved = os.environ.get("TZ")
+
+        def restore():
+            if saved is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = saved
+            time.tzset()
+
+        self.addCleanup(restore)
+        os.environ["TZ"] = "Asia/Tokyo"
+        time.tzset()
+        super().setUp()
 
 
 class TestColorFor(unittest.TestCase):
@@ -76,6 +100,32 @@ class TestFmtReset(unittest.TestCase):
         self.assertIsNone(sl.fmt_reset(now - 1, now))
         self.assertIsNone(sl.fmt_reset(now, now))
         self.assertIsNone(sl.fmt_reset(None, now))
+
+
+class TestFmtResetAt(TZFixture, unittest.TestCase):
+    # JST では 1999992620 = 2033-05-18 10:30:20
+    NOW = 1999992620.0
+
+    def test_同じ日なら時刻だけを返す(self):
+        # +7380 秒 → 同日 12:33
+        self.assertEqual(sl.fmt_reset_at(self.NOW + 7380, self.NOW), "12:33")
+
+    def test_暦日が変われば24時間以内でも日付を付ける(self):
+        # +80980 秒（22.5 時間）→ 翌日 05/19 09:00
+        self.assertEqual(sl.fmt_reset_at(self.NOW + 80980, self.NOW), "5/19 09:00")
+
+    def test_数日先なら日付を付ける(self):
+        # +432000 秒（5 日）→ 05/23 10:30
+        self.assertEqual(sl.fmt_reset_at(self.NOW + 432000, self.NOW), "5/23 10:30")
+
+    def test_過去や欠損ではNoneを返す(self):
+        self.assertIsNone(sl.fmt_reset_at(self.NOW - 1, self.NOW))
+        self.assertIsNone(sl.fmt_reset_at(self.NOW, self.NOW))
+        self.assertIsNone(sl.fmt_reset_at(None, self.NOW))
+
+    def test_表現できないタイムスタンプではNoneを返す(self):
+        # fmt_reset は巨大な "d" を返して素通りするので、ここで落ちると 3 行目が丸ごと消える
+        self.assertIsNone(sl.fmt_reset_at(1e20, self.NOW))
 
 
 class TestFmtElapsed(unittest.TestCase):
@@ -280,13 +330,13 @@ class TestLineSession(unittest.TestCase):
         self.assertIn("⚡ xhigh", plain(out))
 
 
-class TestLineMeters(unittest.TestCase):
+class TestLineMeters(TZFixture, unittest.TestCase):
     def test_全セグメントを出す(self):
         out = plain(sl.line_meters(payload(), 1999992620.0))
         self.assertEqual(
             out,
-            "ctx ▓░░░░░░░░░ 10% 98k/1M │ 🔥 5h ▓▓▓▓▓▓▓░░░ 67% ↺2:03"
-            " │ 📅 7d ▓▓░░░░░░░░ 22% ↺5d │ 💰 $2.69 · 12m · +156/-23",
+            "ctx ▓░░░░░░░░░ 10% 98k/1M │ 🔥 5h ▓▓▓▓▓▓▓░░░ 67% ↺2:03 (12:33)"
+            " │ 📅 7d ▓▓░░░░░░░░ 22% ↺5d (5/23 10:30) │ 💰 $2.69 · 12m · +156/-23",
         )
 
     def test_rate_limits欠損時はctxとコストだけになる(self):
@@ -309,6 +359,14 @@ class TestLineMeters(unittest.TestCase):
         # 両方の枠のリセット時刻を過ぎた時刻を渡す
         out = plain(sl.line_meters(payload(), 2000424621.0))
         self.assertNotIn("↺", out)
+
+    def test_リセット時刻が表現できなくても残り時間は出す(self):
+        d = payload()
+        d["rate_limits"]["five_hour"]["resets_at"] = 1e20
+        out = plain(sl.line_meters(d, 1999992620.0))
+        self.assertIn("🔥", out)
+        self.assertIn("↺", out)
+        self.assertTrue(out.endswith("+156/-23"))
 
     def test_200kモデルでは分母が200kになる(self):
         d = payload()

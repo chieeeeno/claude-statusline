@@ -86,6 +86,36 @@ def fmt_reset(resets_at, now):
     return f"{sec // 60}m"
 
 
+def fmt_reset_at(resets_at, now):
+    """レート制限枠がリセットされるローカル時刻。
+
+    日付を添える条件を「24 時間以上先か」ではなく「暦日が今日と違うか」にしている。
+    23:00 に翌 01:00 リセットのような場合、残りは 2 時間でも時刻だけでは翌日と読めない。
+
+    表示するかどうかの判定は fmt_reset と同じ式にしてある。片方だけが値を返すと
+    「残り時間はあるのにリセット時刻が出ない」ような噛み合わない表示になる。
+
+    @param resets_at リセット時刻（Unix 秒）。None 可
+    @param now 現在時刻（Unix 秒）
+    @returns "12:33" / "5/23 10:30"。表示すべきでない場合は None
+    """
+    if not resets_at:
+        return None
+    if int(resets_at - now) <= 0:
+        return None
+    try:
+        at = datetime.fromtimestamp(resets_at)
+        today = datetime.fromtimestamp(now).date()
+    except (OSError, OverflowError, ValueError):
+        # resets_at はペイロード由来なので time_t に収まらない値が来うる。ここで
+        # 例外を通すと line_meters ごと落ちて 3 行目が丸ごと消えるため、残り時間
+        # だけの表示に縮退させる
+        return None
+    if at.date() == today:
+        return at.strftime("%H:%M")
+    return "{}/{} {}".format(at.month, at.day, at.strftime("%H:%M"))
+
+
 def fmt_elapsed(ms):
     """セッション経過時間を整形する。
 
@@ -207,7 +237,9 @@ def _meter(emoji, label, pct, resets_at, now):
     seg = f"{emoji} {GRAY}{label}{RESET} {bar(pct)} {color_for(pct)}{pct:.0f}%{RESET}"
     left = fmt_reset(resets_at, now)
     if left:
-        seg += f" {GRAY}↺{left}{RESET}"
+        at = fmt_reset_at(resets_at, now)
+        when = f"{left} ({at})" if at else left
+        seg += f" {GRAY}↺{when}{RESET}"
     return seg
 
 
