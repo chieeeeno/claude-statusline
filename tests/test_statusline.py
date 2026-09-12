@@ -107,8 +107,8 @@ class TestResetWindow(TZFixture, unittest.TestCase):
         self.assertIsNone(sl.reset_window(0, self.NOW))
 
     def test_秒ではなくミリ秒が来たらNoneを返す(self):
-        # 秒として読むと西暦 5 万年台。残り時間に素通しすると ↺20687238d という
-        # 19 桁の無意味な表示になるため、時刻ごと出さない
+        # 秒として読むと西暦 5 万年台。残り時間に素通しすると ↺20684798d という
+        # 無意味な表示になるため、時刻ごと出さない
         self.assertIsNone(sl.reset_window(1789166552000, self.NOW))
 
     def test_datetimeにできない値ではNoneを返す(self):
@@ -376,7 +376,7 @@ class TestLineMeters(TZFixture, unittest.TestCase):
         self.assertNotIn("↺", out)
 
     def test_表現できない時刻は残り時間ごと消す(self):
-        # ミリ秒で渡された場合。↺20687238d のような無意味な表示を出さない
+        # ミリ秒で渡された場合。↺20684798d のような無意味な表示を出さない
         d = payload()
         d["rate_limits"]["five_hour"]["resets_at"] = 1789166552000
         out = plain(sl.line_meters(d, 1999992620.0))
