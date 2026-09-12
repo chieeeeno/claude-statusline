@@ -7,7 +7,7 @@ A fast, dependency-free status line for [Claude Code](https://claude.com/claude-
 ```
 📁 my-repo  ⧉ feature-branch
 ⑂ feature/add-search  🧠 Opus 5 (1M)  ⚡ xhigh  📖 Explanatory  🤔 on
-ctx ▓░░░░░░░░░ 10% 98k/1M │ 🔥 5h ▓▓▓▓▓▓▓░░░ 67% ↺2:03 │ 📅 7d ▓▓░░░░░░░░ 22% ↺5d │ 💰 $2.69 · 12m
+ctx ▓░░░░░░░░░ 10% 98k/1M │ 🔥 5h ▓▓▓▓▓▓▓░░░ 67% ↺2:03 (12:33) │ 📅 7d ▓▓░░░░░░░░ 22% ↺5d (5/23 10:30) │ 💰 $2.69 · 12m
 ```
 
 ## Why another status line?
@@ -16,7 +16,8 @@ ctx ▓░░░░░░░░░ 10% 98k/1M │ 🔥 5h ▓▓▓▓▓▓▓�
   to write the settings entry during setup. Node-based status lines pay 100ms+ of startup on
   every redraw, against a 300ms debounce window.
 - **Rate limit windows.** Shows your 5-hour and 7-day usage together with the time left until
-  each window resets — so you can see whether to keep going or wrap up.
+  each window resets and the local clock time it resets at (`↺2:03 (12:33)`) — so you can see
+  whether to keep going or wrap up. The date is added when the reset falls on another day.
 - **Zero dependencies.** Python standard library only.
 
 ## Install

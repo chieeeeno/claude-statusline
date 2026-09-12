@@ -67,23 +67,59 @@ def fmt_tokens(n):
     return str(n)
 
 
-def fmt_reset(resets_at, now):
-    """レート制限枠がリセットされるまでの残り時間。
+def reset_window(resets_at, now):
+    """リセットまでの残り秒数とリセット時刻を組で返す。
+
+    「表示してよい resets_at か」の判定はここ 1 か所に集める。残り時間と時刻で
+    別々に判定すると、片方だけが値を返して噛み合わない表示になる。
+
+    resets_at はペイロード由来なので、秒ではなくミリ秒が来たり、Infinity や
+    文字列が来たりしうる。datetime にできない値はリセット時刻として意味を
+    なさないので、残り時間ごと出さない。4.9 のとおり、意味のない文字列を
+    並べるくらいならセグメントごと消す。ミリ秒を素通しすると ↺20684798d の
+    ような、秒として読んだ日数がそのまま出る表示になる。
 
     @param resets_at リセット時刻（Unix 秒）。None 可
     @param now 現在時刻（Unix 秒）
-    @returns "5d" / "2:03" / "47m"。表示すべきでない場合は None
+    @returns (残り秒数, リセット時刻の datetime) の組。表示すべきでなければ None
     """
     if not resets_at:
         return None
-    sec = int(resets_at - now)
-    if sec <= 0:
+    try:
+        sec = int(resets_at - now)
+        if sec <= 0:
+            return None
+        return sec, datetime.fromtimestamp(resets_at)
+    except (OSError, OverflowError, TypeError, ValueError):
         return None
+
+
+def fmt_reset(sec):
+    """レート制限枠がリセットされるまでの残り時間。
+
+    @param sec 残り秒数（正の整数）
+    @returns "5d" / "2:03" / "47m"
+    """
     if sec >= 86400:
         return f"{sec // 86400}d"
     if sec >= 3600:
         return f"{sec // 3600}:{(sec % 3600) // 60:02d}"
     return f"{sec // 60}m"
+
+
+def fmt_reset_at(at, now):
+    """レート制限枠がリセットされるローカル時刻。
+
+    日付を添える条件を「24 時間以上先か」ではなく「暦日が今日と違うか」にしている。
+    23:00 に翌 01:00 リセットのような場合、残りは 2 時間でも時刻だけでは翌日と読めない。
+
+    @param at リセット時刻（ローカル datetime）
+    @param now 現在時刻（Unix 秒）
+    @returns "12:33" / "5/23 10:30"
+    """
+    if at.date() == datetime.fromtimestamp(now).date():
+        return at.strftime("%H:%M")
+    return "{}/{} {}".format(at.month, at.day, at.strftime("%H:%M"))
 
 
 def fmt_elapsed(ms):
@@ -205,9 +241,10 @@ def _meter(emoji, label, pct, resets_at, now):
     @returns セグメント文字列
     """
     seg = f"{emoji} {GRAY}{label}{RESET} {bar(pct)} {color_for(pct)}{pct:.0f}%{RESET}"
-    left = fmt_reset(resets_at, now)
-    if left:
-        seg += f" {GRAY}↺{left}{RESET}"
+    window = reset_window(resets_at, now)
+    if window:
+        sec, at = window
+        seg += f" {GRAY}↺{fmt_reset(sec)} ({fmt_reset_at(at, now)}){RESET}"
     return seg
 
 
