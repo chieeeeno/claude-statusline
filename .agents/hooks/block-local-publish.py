@@ -4,7 +4,7 @@
 .agents/hooks.json から run_command 実行前に呼び出される。
 stdin で PreToolUse ペイロード（JSON）を受け取り、ローカル publish コマンドを
 検出した場合は decision: "deny"、それ以外は decision: "allow" を stdout に返して
-常に終了コード 0 で終了する（異常入力時はフェイルクローズで deny を返す）。
+常に終了コード 0 で終了する（異常入力・解析不能時はフェイルクローズで deny を返す）。
 """
 
 import json
@@ -26,7 +26,8 @@ INVALID_INPUT_REASON = (
 
 PACKAGE_MANAGERS = frozenset(("npm", "bun", "pnpm", "yarn"))
 SHELL_BINARIES = frozenset(("sh", "bash", "zsh", "dash", "ksh", "fish"))
-SEPARATORS = frozenset((";", "&&", "||", "|", "&", "(", ")", "\n"))
+SEGMENT_SEP_CHARS = frozenset(";&|()\n")
+REDIR_CHARS = frozenset("<>")
 LEADING_KEYWORDS = frozenset(
     (
         "if",
@@ -43,51 +44,384 @@ LEADING_KEYWORDS = frozenset(
         "!",
         "{",
         "}",
+        "coproc",
     )
 )
 ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 SHORT_C_FLAG_RE = re.compile(r"^-[A-Za-z]*c[A-Za-z]*$")
+ENV_SHORT_S_RE = re.compile(r"^-[A-Za-z]*S(.*)$")
 
-# パッケージマネージャのサブコマンド前に値を取る主なグローバルオプション
-PM_VALUE_FLAGS = frozenset(
+# 先頭引数（フラグなし）がこれらであれば publish 実行ではないと確定できるサブコマンド群
+SAFE_PM_SUBCOMMANDS = frozenset(
     (
-        "-C",
-        "--prefix",
-        "--cwd",
-        "--dir",
-        "--registry",
-        "--userconfig",
-        "--globalconfig",
-        "--cache",
-        "--filter",
-        "-F",
-        "--workspace",
-        "-w",
-        "--config",
-        "-c",
-        "--env-file",
-        "--loglevel",
-        "--tag",
-        "--otp",
-        "--access",
+        "view",
+        "info",
+        "show",
+        "pack",
+        "test",
+        "t",
+        "tst",
+        "run",
+        "run-script",
+        "install",
+        "i",
+        "ci",
+        "add",
+        "remove",
+        "rm",
+        "uninstall",
+        "update",
+        "up",
+        "audit",
+        "outdated",
+        "ls",
+        "list",
+        "help",
+        "version",
+        "init",
+        "create",
+        "build",
+        "start",
+        "dev",
+        "why",
+        "explain",
+        "ping",
+        "whoami",
+        "doctor",
+        "cache",
+        "config",
+        "link",
+        "unlink",
+        "prune",
+        "dedupe",
+        "rebuild",
+        "fund",
+        "search",
+        "s",
+        "dlx",
     )
 )
 
-SUDO_VALUE_FLAGS = frozenset(("-u", "-g", "-C", "-p", "-r", "-t", "-U", "-h", "-T"))
+SUDO_VALUE_FLAGS = frozenset(
+    (
+        "-u",
+        "--user",
+        "-g",
+        "--group",
+        "-C",
+        "--close-from",
+        "-p",
+        "--prompt",
+        "-r",
+        "--role",
+        "-t",
+        "--type",
+        "-U",
+        "--other-user",
+        "-h",
+        "--host",
+        "-T",
+        "--command-timeout",
+        "-R",
+        "--chroot",
+        "-D",
+        "--chdir",
+    )
+)
 ENV_VALUE_FLAGS = frozenset(("-u", "--unset", "-C", "--chdir", "-P", "-S", "--split-string"))
 TIMEOUT_VALUE_FLAGS = frozenset(("-k", "--kill-after", "-s", "--signal"))
 NPX_VALUE_FLAGS = frozenset(("-p", "--package", "-c", "--call", "--userconfig"))
-
-# shlex が未閉鎖クォート等で失敗したときの保守的フォールバック正規表現
-FALLBACK_PUBLISH_RE = re.compile(
-    r"(?:^|[;&|(\n`])\s*"
-    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
-    r"(?:(?:env|sudo|command|builtin|exec|nohup|time|corepack|npx|bunx)\s+)*"
-    r"(?:[^\s/;&|]+/)?"
-    r"(?:(?:npm|bun|pnpm)\b[^\n;&|]*\bpublish\b|yarn\b[^\n;&|]*\b(?:npm\s+)?publish\b)"
-)
+NICE_VALUE_FLAGS = frozenset(("-n", "--adjustment"))
+SHELL_VALUE_FLAGS = frozenset(("-o", "+o", "--rcfile", "--init-file"))
 
 MAX_DEPTH = 5
+
+
+def _decode_ansi_c_escape(body):
+    """ANSI-C クォート ($'...') のエスケープシーケンスを展開する。"""
+    out = []
+    i = 0
+    n = len(body)
+    simple = {
+        "a": "\a",
+        "b": "\b",
+        "e": "\x1b",
+        "E": "\x1b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "v": "\v",
+        "\\": "\\",
+        "'": "'",
+        '"': '"',
+        "?": "?",
+    }
+    while i < n:
+        ch = body[i]
+        if ch != "\\" or i + 1 >= n:
+            out.append(ch)
+            i += 1
+            continue
+        nxt = body[i + 1]
+        if nxt in simple:
+            out.append(simple[nxt])
+            i += 2
+            continue
+        if nxt == "x":
+            m = re.match(r"[0-9A-Fa-f]{1,2}", body[i + 2:])
+            if m:
+                out.append(chr(int(m.group(0), 16)))
+                i += 2 + len(m.group(0))
+                continue
+        if nxt == "u":
+            m = re.match(r"[0-9A-Fa-f]{1,4}", body[i + 2:])
+            if m:
+                out.append(chr(int(m.group(0), 16)))
+                i += 2 + len(m.group(0))
+                continue
+        if nxt == "U":
+            m = re.match(r"[0-9A-Fa-f]{1,8}", body[i + 2:])
+            if m:
+                code = int(m.group(0), 16)
+                if code <= 0x10FFFF:
+                    out.append(chr(code))
+                i += 2 + len(m.group(0))
+                continue
+        if "0" <= nxt <= "7":
+            m = re.match(r"[0-7]{1,3}", body[i + 1:])
+            if m:
+                out.append(chr(int(m.group(0), 8) & 0xFF))
+                i += 1 + len(m.group(0))
+                continue
+        out.append(nxt)
+        i += 2
+    return "".join(out)
+
+
+def _normalize_ansi_c_quotes(command):
+    """クォート外の $'...' を通常の単一引用符へ正規化する。"""
+    out = []
+    i = 0
+    n = len(command)
+    in_single = False
+    in_double = False
+
+    while i < n:
+        ch = command[i]
+        if in_single:
+            out.append(ch)
+            if ch == "'":
+                in_single = False
+            i += 1
+            continue
+        if in_double:
+            if ch == "\\" and i + 1 < n:
+                out.append(command[i:i + 2])
+                i += 2
+                continue
+            out.append(ch)
+            if ch == '"':
+                in_double = False
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        if ch == "$" and i + 1 < n and command[i + 1] == "'":
+            j = i + 2
+            while j < n:
+                if command[j] == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if command[j] == "'":
+                    break
+                j += 1
+            if j < n:
+                decoded = _decode_ansi_c_escape(command[i + 2:j])
+                out.append("'" + decoded.replace("'", "'\\''") + "'")
+                i = j + 1
+                continue
+        if ch == "'":
+            in_single = True
+        elif ch == '"':
+            in_double = True
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _parse_heredoc_specs(line):
+    """1 行の中からクォート外のヒアドキュメント指定 (<< / <<-) を抽出する。"""
+    specs = []
+    i = 0
+    n = len(line)
+    in_single = False
+    in_double = False
+
+    while i < n:
+        ch = line[i]
+        if in_single:
+            if ch == "'":
+                in_single = False
+            i += 1
+            continue
+        if in_double:
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if ch == '"':
+                in_double = False
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if ch == "'":
+            in_single = True
+            i += 1
+            continue
+        if ch == '"':
+            in_double = True
+            i += 1
+            continue
+        if ch == "#" and (i == 0 or line[i - 1] in " \t;&|(){}"):
+            break
+        if ch == "<" and i + 1 < n and line[i + 1] == "<":
+            # ヒアストリング (<<<) は対象外
+            if i + 2 < n and line[i + 2] == "<":
+                i += 3
+                continue
+            j = i + 2
+            strip_tabs = False
+            if j < n and line[j] == "-":
+                strip_tabs = True
+                j += 1
+            while j < n and line[j] in " \t":
+                j += 1
+            delim_chars = []
+            quoted = False
+            while j < n and line[j] not in " \t;&|()<>#\r\n":
+                c = line[j]
+                if c == "'" and j + 1 < n:
+                    quoted = True
+                    j += 1
+                    while j < n and line[j] != "'":
+                        delim_chars.append(line[j])
+                        j += 1
+                    if j < n:
+                        j += 1
+                elif c == '"' and j + 1 < n:
+                    quoted = True
+                    j += 1
+                    while j < n and line[j] != '"':
+                        if line[j] == "\\" and j + 1 < n:
+                            j += 1
+                        delim_chars.append(line[j])
+                        j += 1
+                    if j < n:
+                        j += 1
+                elif c == "\\" and j + 1 < n:
+                    quoted = True
+                    delim_chars.append(line[j + 1])
+                    j += 2
+                else:
+                    delim_chars.append(c)
+                    j += 1
+            delim = "".join(delim_chars)
+            if delim:
+                specs.append((delim, strip_tabs, quoted))
+            i = j
+            continue
+        i += 1
+    return specs
+
+
+def _strip_heredocs(command):
+    """ヒアドキュメント本文をシェル構文から分離する。
+
+    クォート付きヒアドキュメント (<<'EOF' 等) の本文は展開されないため除去し、
+    非クォート (<<EOF) の本文は $(...) / `...` 検査用に別途返す。
+    """
+    lines = command.splitlines(True)
+    kept_lines = []
+    unquoted_bodies = []
+    pending = []
+
+    for line in lines:
+        if pending:
+            delim, strip_tabs, quoted, buf = pending[0]
+            cmp_line = line.rstrip("\r\n")
+            if strip_tabs:
+                cmp_line = cmp_line.lstrip("\t")
+            if cmp_line == delim:
+                if not quoted and buf:
+                    unquoted_bodies.append("".join(buf))
+                pending.pop(0)
+            else:
+                buf.append(line)
+            continue
+
+        kept_lines.append(line)
+        for delim, strip_tabs, quoted in _parse_heredoc_specs(line):
+            pending.append((delim, strip_tabs, quoted, []))
+
+    # 終端行がないまま入力が終わった場合も非クォート本文は検査対象に残す
+    for _, _, quoted, buf in pending:
+        if not quoted and buf:
+            unquoted_bodies.append("".join(buf))
+
+    return "".join(kept_lines), unquoted_bodies
+
+
+def _strip_shell_comments(command):
+    """クォート外の # コメントを行末改行を残して除去する。"""
+    out = []
+    i = 0
+    n = len(command)
+    in_single = False
+    in_double = False
+
+    while i < n:
+        ch = command[i]
+        if in_single:
+            out.append(ch)
+            if ch == "'":
+                in_single = False
+            i += 1
+            continue
+        if in_double:
+            if ch == "\\" and i + 1 < n:
+                out.append(command[i:i + 2])
+                i += 2
+                continue
+            out.append(ch)
+            if ch == '"':
+                in_double = False
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        if ch == "'":
+            in_single = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            in_double = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "#" and (i == 0 or command[i - 1] in " \t\r\n;&|(){}"):
+            while i < n and command[i] != "\n":
+                i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _extract_substitutions(command):
@@ -169,22 +503,69 @@ def _extract_substitutions(command):
     return results
 
 
+def _is_separator_token(tok):
+    """連続した区切り文字（\\n\\n, ;\\n, )\\n, &&( 等）も含めて区切りトークンか判定する。"""
+    return bool(tok) and all(ch in SEGMENT_SEP_CHARS for ch in tok)
+
+
+def _is_redirection_token(tok):
+    """リダイレクト演算子トークン（<, >, >>, >&, <& , <<< 等）か判定する。"""
+    if not tok:
+        return False
+    if tok[0] in REDIR_CHARS and all(ch in "<>&|-" for ch in tok):
+        return True
+    return False
+
+
+def _strip_redirections(tokens):
+    """セグメントからシェルリダイレクトを除去し、(残余トークン, ヒアストリング一覧) を返す。"""
+    cleaned = []
+    here_strings = []
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if _is_redirection_token(tok):
+            if cleaned and cleaned[-1].isdigit():
+                cleaned.pop()
+            if tok == "<<<" and i + 1 < n:
+                here_strings.append(tokens[i + 1])
+                i += 2
+                continue
+            # リダイレクト対象トークンもスキップする
+            i += 2 if i + 1 < n else 1
+            continue
+        cleaned.append(tok)
+        i += 1
+    return cleaned, here_strings
+
+
 def _split_segments(command):
     """シェルコマンドを単純コマンド単位のトークン列に分解する。"""
-    lex = shlex.shlex(command, posix=True, punctuation_chars=";&|()\n")
-    # 空白と区切り演算子のみで分割する（URL の : 等でトークンが割れないようにする）
+    lex = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>\n")
+    # 空白と区切り・リダイレクト演算子のみで分割する（URL の : 等で割れないようにする）
     lex.whitespace_split = True
     # 改行を空白ではなくコマンド区切りトークンとして扱う
     lex.whitespace = " \t\r"
+    # コメントは前処理で改行を残して除去済みのため shlex 側では無効化する
+    lex.commenters = ""
     tokens = list(lex)
 
     segments = []
     current = []
     for tok in tokens:
-        if tok in SEPARATORS:
+        if _is_separator_token(tok):
             if current:
                 segments.append(current)
                 current = []
+        elif tok.startswith("&>") or tok.startswith("|&"):
+            if tok == "|&":
+                if current:
+                    segments.append(current)
+                    current = []
+            else:
+                # &> / &>> リダイレクトは次トークンとともに除去できるようリダイレクト扱いに変換
+                current.append(">" + tok[1:])
         else:
             current.append(tok)
     if current:
@@ -192,40 +573,39 @@ def _split_segments(command):
     return segments
 
 
-def _pm_invokes_publish(pm_name, args):
-    """npm / bun / pnpm / yarn の引数リストが publish サブコマンドを起動するか判定する。"""
-    positionals = []
-    i = 0
-    n = len(args)
-    while i < n:
-        tok = args[i]
+def _pm_invokes_publish(args):
+    """npm / bun / pnpm / yarn の引数リストが publish サブコマンドを起動するか判定する。
+
+    既知オプション一覧に依存すると未登録オプションの値で誤判定されるため、
+    フラグなしで先頭に明確な安全サブコマンドが来る場合を除き、-- より前に
+    publish トークンが現れるかを検査する。
+    """
+    if not args:
+        return False
+    if args[0] in SAFE_PM_SUBCOMMANDS:
+        return False
+    for tok in args:
         if tok == "--":
             break
-        if tok.startswith("-"):
-            if tok in PM_VALUE_FLAGS and i + 1 < n:
-                i += 2
-                continue
-            i += 1
-            continue
-        positionals.append(tok)
-        if len(positionals) >= 2:
-            break
-        i += 1
-
-    if not positionals:
-        return False
-    if positionals[0] == "publish":
-        return True
-    if pm_name == "yarn" and positionals[0] == "npm" and len(positionals) >= 2:
-        return positionals[1] == "publish"
+        if tok == "publish":
+            return True
     return False
 
 
-def _segment_is_publish(tokens, depth):
+def _strip_package_version(token):
+    """npx / bunx で指定されたパッケージ名（例: npm@latest）から @version を外す。"""
+    base = os.path.basename(token)
+    if base.startswith("@"):
+        return base
+    return base.split("@", 1)[0]
+
+
+def _segment_is_publish(raw_tokens, depth):
     """単一コマンドのトークン列がローカル publish を実行するか判定する。"""
     if depth > MAX_DEPTH:
-        return False
+        return True
 
+    tokens, here_strings = _strip_redirections(raw_tokens)
     idx = 0
     n = len(tokens)
 
@@ -237,12 +617,25 @@ def _segment_is_publish(tokens, depth):
 
         cmd = os.path.basename(tok)
 
-        if cmd in ("command", "builtin", "nohup", "time", "nice"):
+        if cmd in ("command", "builtin", "nohup", "time"):
             idx += 1
             while idx < n and tokens[idx].startswith("-"):
                 if tokens[idx] == "--":
                     idx += 1
                     break
+                idx += 1
+            continue
+
+        if cmd == "nice":
+            idx += 1
+            while idx < n and tokens[idx].startswith("-"):
+                flag = tokens[idx]
+                if flag == "--":
+                    idx += 1
+                    break
+                if flag in NICE_VALUE_FLAGS and idx + 1 < n:
+                    idx += 2
+                    continue
                 idx += 1
             continue
 
@@ -272,6 +665,20 @@ def _segment_is_publish(tokens, depth):
                     if is_local_publish_command(arg[len("--split-string="):], depth + 1):
                         return True
                     idx += 1
+                    continue
+                m_short_s = ENV_SHORT_S_RE.match(arg)
+                if m_short_s:
+                    inline_val = m_short_s.group(1)
+                    if inline_val:
+                        if is_local_publish_command(inline_val, depth + 1):
+                            return True
+                        idx += 1
+                    elif idx + 1 < n:
+                        if is_local_publish_command(tokens[idx + 1], depth + 1):
+                            return True
+                        idx += 2
+                    else:
+                        idx += 1
                     continue
                 if arg in ENV_VALUE_FLAGS and idx + 1 < n:
                     idx += 2
@@ -322,11 +729,12 @@ def _segment_is_publish(tokens, depth):
                 if flag == "--":
                     idx += 1
                     break
-                if flag in ("-c", "--call") and idx + 1 < n:
-                    if is_local_publish_command(tokens[idx + 1], depth + 1):
-                        return True
-                    idx += 2
-                    continue
+                if flag in ("-c", "--call") or SHORT_C_FLAG_RE.match(flag):
+                    if idx + 1 < n:
+                        if is_local_publish_command(tokens[idx + 1], depth + 1):
+                            return True
+                        idx += 2
+                        continue
                 if flag.startswith("--call="):
                     if is_local_publish_command(flag[len("--call="):], depth + 1):
                         return True
@@ -336,29 +744,43 @@ def _segment_is_publish(tokens, depth):
                     idx += 2
                     continue
                 idx += 1
+            if idx < n and _strip_package_version(tokens[idx]) in PACKAGE_MANAGERS:
+                return _pm_invokes_publish(tokens[idx + 1:])
             continue
 
         if cmd == "eval":
-            rest = " ".join(tokens[idx + 1:])
-            return is_local_publish_command(rest, depth + 1)
+            rest_tokens = tokens[idx + 1:]
+            if rest_tokens and rest_tokens[0] == "--":
+                rest_tokens = rest_tokens[1:]
+            return is_local_publish_command(" ".join(rest_tokens), depth + 1)
 
         if cmd in SHELL_BINARIES:
+            for hs in here_strings:
+                if is_local_publish_command(hs, depth + 1):
+                    return True
             j = idx + 1
             while j < n:
                 arg = tokens[j]
                 if arg == "--":
                     break
+                if arg in SHELL_VALUE_FLAGS:
+                    j += 2
+                    continue
                 if arg == "-c" or SHORT_C_FLAG_RE.match(arg):
-                    if j + 1 < n and is_local_publish_command(tokens[j + 1], depth + 1):
+                    k = j + 1
+                    if k < n and tokens[k] == "--":
+                        k += 1
+                    if k < n and is_local_publish_command(tokens[k], depth + 1):
                         return True
                     break
-                if not arg.startswith("-"):
-                    break
-                j += 1
+                if arg.startswith("-") or arg.startswith("+"):
+                    j += 1
+                    continue
+                break
             return False
 
         if cmd in PACKAGE_MANAGERS:
-            return _pm_invokes_publish(cmd, tokens[idx + 1:])
+            return _pm_invokes_publish(tokens[idx + 1:])
 
         return False
 
@@ -370,16 +792,26 @@ def is_local_publish_command(command, depth=0):
     if not isinstance(command, str) or not command.strip():
         return False
     if depth > MAX_DEPTH:
-        return False
+        return True
 
-    for sub in _extract_substitutions(command):
+    stripped_cmd, unquoted_heredocs = _strip_heredocs(command)
+    normalized = _normalize_ansi_c_quotes(stripped_cmd)
+    no_comments = _strip_shell_comments(normalized)
+
+    for body in unquoted_heredocs:
+        for sub in _extract_substitutions(body):
+            if is_local_publish_command(sub, depth + 1):
+                return True
+
+    for sub in _extract_substitutions(no_comments):
         if is_local_publish_command(sub, depth + 1):
             return True
 
     try:
-        segments = _split_segments(command)
+        segments = _split_segments(no_comments)
     except ValueError:
-        return bool(FALLBACK_PUBLISH_RE.search(command))
+        # 解析不能なシェル構文はフェイルクローズで拒否する
+        return True
 
     for seg in segments:
         if _segment_is_publish(seg, depth):

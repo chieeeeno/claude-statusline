@@ -54,6 +54,7 @@ class TestBlockLocalPublishLogic(unittest.TestCase):
             "yarn publish --access public",
             "yarn npm publish",
             "yarn npm publish --access public",
+            "yarn workspaces foreach npm publish",
         ]
         for cmd in commands:
             with self.subTest(cmd=cmd):
@@ -61,13 +62,20 @@ class TestBlockLocalPublishLogic(unittest.TestCase):
                 self.assertEqual(res["decision"], "deny")
                 self.assertIn("publish", res["reason"])
 
-    def test_denies_flags_before_publish_and_paths(self):
+    def test_denies_flags_before_publish_paths_and_ansi_c_quotes(self):
         commands = [
             "npm --prefix . publish",
             "npm -C /tmp/pkg publish",
             "npm --registry https://registry.npmjs.org/ publish",
             "npm --registry=https://registry.npmjs.org/ publish",
             "npm --userconfig /tmp/.npmrc publish",
+            "npm --color always publish",
+            "npm --fetch-retries 1 publish",
+            "npm --provenance false publish",
+            "npm --location project publish",
+            "npm --ignore-scripts --color always publish",
+            "npm --tag test publish",
+            "bun --conditions foo publish",
             "pnpm --dir . publish",
             "pnpm -r publish",
             "yarn --cwd . npm publish",
@@ -76,6 +84,23 @@ class TestBlockLocalPublishLogic(unittest.TestCase):
             "./node_modules/.bin/pnpm publish",
             '"npm" "publish"',
             "n'p'm pub\"lish\"",
+            "$'npm' publish",
+            "$'\\x6e\\x70\\x6d' $'publish'",
+        ]
+        for cmd in commands:
+            with self.subTest(cmd=cmd):
+                self.assertTrue(hook.is_local_publish_command(cmd))
+
+    def test_denies_redirections_and_here_strings(self):
+        commands = [
+            "</dev/null npm publish",
+            "< /dev/null npm publish",
+            ">/dev/null npm publish",
+            "2>&1 npm publish",
+            "npm</dev/null publish",
+            "npm publish 2>/dev/null",
+            'sh <<< "npm publish"',
+            "zsh <<< 'bun publish --ignore-scripts'",
         ]
         for cmd in commands:
             with self.subTest(cmd=cmd):
@@ -88,17 +113,25 @@ class TestBlockLocalPublishLogic(unittest.TestCase):
             "env FOO=1 BAR=2 bun publish",
             "env -u FOO npm publish",
             "env -S 'npm publish'",
+            'env -iS "npm publish"',
             "sudo npm publish",
             "sudo -E bun publish",
+            "sudo --user root npm publish",
             "command npm publish",
             "exec npm publish",
             "nohup pnpm publish",
             "time npm publish",
+            "nice -n 0 npm publish",
+            "nice -n 10 npm publish",
             "timeout 30 npm publish",
+            "coproc npm publish",
             "corepack pnpm publish",
             "corepack yarn npm publish",
             "npx npm publish",
+            "npx npm@latest publish",
+            "bunx npm@11 publish",
             "npx --yes -c 'npm publish'",
+            'npx -yc "npm publish"',
             "bunx pnpm publish",
         ]
         for cmd in commands:
@@ -112,7 +145,13 @@ class TestBlockLocalPublishLogic(unittest.TestCase):
             "false || pnpm publish",
             "echo ok | yarn publish",
             "echo hi\nnpm publish",
+            "echo ok\n\nnpm publish",
+            "echo ok;\nnpm publish",
+            "(echo ok)\nnpm publish",
+            "echo ok&&(npm publish)",
+            "echo ok ||\nnpm publish",
             "# comment\nnpm publish",
+            "bun run test # run tests\nnpm publish",
             "(npm publish)",
             "{ npm publish; }",
             "echo $(npm publish)",
@@ -121,16 +160,32 @@ class TestBlockLocalPublishLogic(unittest.TestCase):
             'sh -c "npm publish"',
             "bash -lc 'bun publish --dry-run'",
             "/bin/zsh -ec 'yarn npm publish'",
+            'bash -o errexit -c "npm publish"',
+            'sh +e -c "npm publish"',
+            'bash -c -- "npm publish"',
+            'sh -c -- "npm publish"',
             'eval "npm publish"',
             "eval npm publish",
+            "eval -- npm publish",
+            'eval -- "npm publish"',
         ]
         for cmd in commands:
             with self.subTest(cmd=cmd):
                 self.assertTrue(hook.is_local_publish_command(cmd))
 
-    def test_denies_unterminated_quote_fallback(self):
-        self.assertTrue(hook.is_local_publish_command('npm publish "unterminated'))
-        self.assertTrue(hook.is_local_publish_command("echo ok && bun publish 'unterminated"))
+    def test_denies_deep_nesting_heredoc_bypasses_and_unterminated_quotes(self):
+        commands = [
+            "eval eval eval eval eval eval npm publish",
+            "\"npm\" publish && cat <<EOF\ndon't\nEOF",
+            'sh -c "npm publish" && cat <<EOF\ndon\'t\nEOF',
+            "eval \"npm publish\"; cat <<EOF\n'\nEOF",
+            "cat <<EOF\n$(npm publish)\nEOF",
+            'npm publish "unterminated',
+            "echo ok && bun publish 'unterminated",
+        ]
+        for cmd in commands:
+            with self.subTest(cmd=cmd):
+                self.assertTrue(hook.is_local_publish_command(cmd))
 
     def test_allows_safe_commands_and_mentions_in_arguments(self):
         commands = [
@@ -151,6 +206,8 @@ class TestBlockLocalPublishLogic(unittest.TestCase):
             "echo 'Do not run npm publish or $(npm publish)'",
             "python3 tests/run_suite.py",
             "git tag -a v2.3.0 -m v2.3.0 && git push origin v2.3.0",
+            "cat <<'EOF' > /tmp/statusline-release-pr.md\nローカルからの `npm publish` を禁止\nEOF",
+            "cat <<EOF\ndon't run local publish\nEOF",
         ]
         for cmd in commands:
             with self.subTest(cmd=cmd):
