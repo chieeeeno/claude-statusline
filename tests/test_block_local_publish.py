@@ -55,6 +55,8 @@ class TestBlockLocalPublishLogic(unittest.TestCase):
             "yarn npm publish",
             "yarn npm publish --access public",
             "yarn workspaces foreach npm publish",
+            "pnpm dlx npm publish --ignore-scripts",
+            "yarn dlx npm publish --ignore-scripts",
         ]
         for cmd in commands:
             with self.subTest(cmd=cmd):
@@ -170,7 +172,13 @@ class TestBlockLocalPublishLogic(unittest.TestCase):
             "bash -euo pipefail -c 'npm publish --ignore-scripts'",
             "sh -eo errexit -c 'npm publish'",
             "bash -oc pipefail 'npm publish'",
-            "bash -co 'npm publish' pipefail",
+            "bash -co pipefail 'npm publish --ignore-scripts'",
+            "sh -co errexit 'npm publish --ignore-scripts'",
+            "zsh -co errexit 'npm publish --ignore-scripts'",
+            "bash -euco pipefail 'npm publish --ignore-scripts'",
+            "bash -c -o errexit 'npm publish --ignore-scripts'",
+            "sh -c -e 'npm publish --ignore-scripts'",
+            "bash -oo errexit pipefail -c 'npm publish'",
             'sh +e -c "npm publish"',
             'bash -c -- "npm publish"',
             'sh -c -- "npm publish"',
@@ -224,6 +232,8 @@ class TestBlockLocalPublishLogic(unittest.TestCase):
             "cat <<'EOF' > /tmp/statusline-release-pr.md\nローカルからの `npm publish` を禁止\nEOF",
             "cat <<EOF\ndon't run local publish\nEOF",
             'echo "line1\n<<\'EOF\' in quoted string\nline3"',
+            "pnpm dlx prettier --check .",
+            "sh -co errexit 'bun run test'",
         ]
         for cmd in commands:
             with self.subTest(cmd=cmd):
@@ -244,6 +254,27 @@ class TestBlockLocalPublishLogic(unittest.TestCase):
             },
         }
         self.assertEqual(hook.evaluate_payload(payload)["decision"], "deny")
+
+    def test_inspects_all_present_command_line_keys(self):
+        payload = {
+            "hookEventName": "PreToolUse",
+            "toolCall": {
+                "id": "toolu_both",
+                "name": "run_command",
+                "args": {"CommandLine": "", "commandLine": "npm publish"},
+            },
+        }
+        self.assertEqual(hook.evaluate_payload(payload)["decision"], "deny")
+
+        bad_type_payload = {
+            "hookEventName": "PreToolUse",
+            "toolCall": {
+                "id": "toolu_both_bad",
+                "name": "run_command",
+                "args": {"CommandLine": "bun run test", "commandLine": 123},
+            },
+        }
+        self.assertEqual(hook.evaluate_payload(bad_type_payload)["decision"], "deny")
 
     def test_fails_closed_on_malformed_payload(self):
         bad_payloads = [

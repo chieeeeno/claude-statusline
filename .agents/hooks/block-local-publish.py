@@ -102,7 +102,6 @@ SAFE_PM_SUBCOMMANDS = frozenset(
         "fund",
         "search",
         "s",
-        "dlx",
     )
 )
 
@@ -820,10 +819,12 @@ def _segment_is_publish(raw_tokens, depth, heredoc_map):
             for inp in here_inputs:
                 if is_local_publish_command(inp, depth + 1):
                     return True
+            saw_c = False
             j = idx + 1
             while j < n:
                 arg = tokens[j]
                 if arg == "--":
+                    j += 1
                     break
                 if arg in SHELL_VALUE_FLAGS:
                     j += 2
@@ -833,38 +834,17 @@ def _segment_is_publish(raw_tokens, depth, heredoc_map):
                     continue
                 if len(arg) >= 2 and arg[0] in ("-", "+") and arg[1:].isalpha():
                     flags_part = arg[1:]
-                    has_o = "o" in flags_part
-                    has_c = (arg[0] == "-") and ("c" in flags_part)
-                    j += 1
-                    if has_o and has_c:
-                        o_pos = flags_part.index("o")
-                        c_pos = flags_part.index("c")
-                        if o_pos < c_pos:
-                            if j < n:
-                                j += 1
-                            if j < n and tokens[j] == "--":
-                                j += 1
-                            if j < n and is_local_publish_command(tokens[j], depth + 1):
-                                return True
-                        else:
-                            if j < n and is_local_publish_command(tokens[j], depth + 1):
-                                return True
-                        break
-                    if has_o:
-                        if j < n:
-                            j += 1
-                        continue
-                    if has_c:
-                        if j < n and tokens[j] == "--":
-                            j += 1
-                        if j < n and is_local_publish_command(tokens[j], depth + 1):
-                            return True
-                        break
+                    if arg[0] == "-" and "c" in flags_part:
+                        saw_c = True
+                    o_count = flags_part.count("o")
+                    j += 1 + o_count
                     continue
                 if arg.startswith("-") or arg.startswith("+"):
                     j += 1
                     continue
                 break
+            if saw_c and j < n and is_local_publish_command(tokens[j], depth + 1):
+                return True
             return False
 
         if cmd in PACKAGE_MANAGERS:
@@ -924,14 +904,16 @@ def evaluate_payload(payload):
     if not isinstance(args, dict):
         return {"decision": "deny", "reason": INVALID_INPUT_REASON}
 
-    command = args.get("CommandLine")
-    if command is None:
-        command = args.get("commandLine")
-    if not isinstance(command, str):
+    present_keys = [k for k in ("CommandLine", "commandLine") if k in args]
+    if not present_keys:
         return {"decision": "deny", "reason": INVALID_INPUT_REASON}
 
-    if is_local_publish_command(command):
-        return {"decision": "deny", "reason": BLOCK_REASON}
+    for key in present_keys:
+        command = args[key]
+        if not isinstance(command, str):
+            return {"decision": "deny", "reason": INVALID_INPUT_REASON}
+        if is_local_publish_command(command):
+            return {"decision": "deny", "reason": BLOCK_REASON}
     return {"decision": "allow"}
 
 

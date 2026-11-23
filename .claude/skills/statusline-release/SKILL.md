@@ -142,10 +142,11 @@ git checkout -b "release/v${TARGET_VER}" main
 git diff
 ```
 
-3. Re-run quick sanity verification after updating `package.json`:
+3. Re-run sanity verification after updating `package.json` so the tarball filename reflects the new
+   version (`chieeeeno-claude-statusline-${TARGET_VER}.tgz`):
 
 ```bash
-bun run typecheck && bun run test
+bun run typecheck && bun run test && bun run prepack && npm pack --dry-run --ignore-scripts --json
 ```
 
 4. Commit and push using the repository's release commit convention (`X.Y.Z に上げる`):
@@ -158,12 +159,15 @@ git push -u origin "release/v${TARGET_VER}"
 
 5. Draft the PR body strictly following the **バージョン上げ PR 本文テンプレート** in
    `docs/03-release-skill-design.md` (with real measured test counts and tarball details), and open
-   the PR against `main`:
+   the PR against `main` using a `mktemp` temporary file (cleaned up immediately after):
 
 ```bash
+PR_BODY=$(mktemp)
+# Write the PR body into "$PR_BODY"
 gh pr create --base main --head "release/v${TARGET_VER}" \
   --title "${TARGET_VER} に上げる" \
-  --body-file /tmp/statusline-release-pr.md
+  --body-file "$PR_BODY"
+rm -f "$PR_BODY"
 ```
 
 6. Wait for all CI checks (`test.yml`) to pass:
@@ -280,9 +284,12 @@ for explicit approval.
 After approval:
 
 ```bash
+NOTES_FILE=$(mktemp)
+# Write the approved release notes into "$NOTES_FILE"
 gh release create "v${TARGET_VER}" \
   --title "v${TARGET_VER}" \
-  --notes-file /tmp/statusline-release-notes.md
+  --notes-file "$NOTES_FILE"
+rm -f "$NOTES_FILE"
 ```
 
 ---
