@@ -13,8 +13,8 @@ ctx ▓░░░░░░░░░ 10% 98k/1M │ 🔥 5h ▓▓▓▓▓▓▓�
 ## Why another status line?
 
 - **No Node at render time.** The status line is rendered by Python (~40ms). Node is used only
-  to write the settings entry during setup. Node-based status lines pay 100ms+ of startup on
-  every redraw, against a 300ms debounce window.
+  during setup to copy `statusline.py` and write the settings entry. Node-based status lines pay
+  100ms+ of startup on every redraw, against a 300ms debounce window.
 - **Rate limit & quota windows.** Shows your 5-hour and 7-day usage (including Antigravity CLI
   `quota` buckets) together with the time left until each window resets and the local clock time
   it resets at (`↺2:03 (12:33)`) — so you can see whether to keep going or wrap up. The date is
@@ -24,16 +24,21 @@ ctx ▓░░░░░░░░░ 10% 98k/1M │ 🔥 5h ▓▓▓▓▓▓▓�
 ## Install
 
 ```bash
-npm install -g @chieeeeno/claude-statusline
-claude-statusline --install
+npx @chieeeeno/claude-statusline --install
 ```
+
+No global install required. `--install` atomically copies `statusline.py` into a stable directory
+under each CLI (`~/.claude/claude-statusline/statusline.py` for Claude Code,
+`~/.gemini/antigravity-cli/claude-statusline/statusline.py` for Antigravity CLI) and points
+`settings.json` directly at that copy — so clearing the `npx` cache never breaks it, and Node is
+never started at render time.
 
 On an interactive terminal (TTY), `--install` displays the current status of each CLI and asks
 which target to configure:
 
 ```
 Select target to install statusLine:
-  1) Claude Code (~/.claude/settings.json) [installed]
+  1) Claude Code (~/.claude/settings.json) [installed v2.1.0]
   2) Antigravity CLI (~/.gemini/antigravity-cli/settings.json) [not installed]
   3) Both
 Enter choice [1-3] (default: 1):
@@ -47,19 +52,27 @@ In non-interactive environments or scripts, pass `--target` explicitly (defaults
 omitted on a non-TTY for backward compatibility):
 
 ```bash
-claude-statusline --install --target claude
-claude-statusline --install --target antigravity
-claude-statusline --install --target all
+npx @chieeeeno/claude-statusline --install --target claude
+npx @chieeeeno/claude-statusline --install --target antigravity
+npx @chieeeeno/claude-statusline --install --target all
 ```
 
-To update:
+### Update
 
 ```bash
-npm update -g @chieeeeno/claude-statusline
+npx @chieeeeno/claude-statusline@latest --install
 ```
 
-No need to re-run `--install` — the settings entry points at the package directory, so the new
-version takes effect immediately.
+Because `statusline.py` is copied into each target directory, re-run `--install` when updating to a
+new release (the script is atomically replaced via a temporary file and `rename`, and the installed
+version is recorded alongside it).
+
+### Migrating from a global install
+
+Existing `settings.json` entries from earlier global installs (`npm install -g`) that point at the
+package directory continue to work without breaking. Running
+`npx @chieeeeno/claude-statusline@latest --install` switches over to the copied script, after which
+you can remove the global package with `npm uninstall -g @chieeeeno/claude-statusline`.
 
 ## What it shows
 
@@ -78,10 +91,10 @@ usage-based API plans.
 ## Commands
 
 ```
-claude-statusline --install [--target <target>] [--runcat]  Write the statusLine entry into settings.json
-claude-statusline --uninstall [--target <target>]           Remove the statusLine entry
-claude-statusline --print                                   Render a payload read from stdin (for debugging)
-claude-statusline --version                                 Print the version
+npx @chieeeeno/claude-statusline --install [--target <target>] [--runcat]  Copy statusline.py and write statusLine into settings.json
+npx @chieeeeno/claude-statusline --uninstall [--target <target>]           Remove the statusLine entry and copied files
+npx @chieeeeno/claude-statusline --print                                   Render a payload read from stdin (for debugging)
+npx @chieeeeno/claude-statusline --version                                 Print CLI and installed versions
 ```
 
 `--target` accepts `claude`, `antigravity`, or `all`. On a TTY, omitting it opens the interactive
@@ -91,11 +104,11 @@ Preview it without changing any settings:
 
 ```bash
 echo '{"model":{"display_name":"Opus 5"},"context_window":{"used_percentage":25,"total_input_tokens":50000,"context_window_size":200000}}' \
-  | claude-statusline --print
+  | npx @chieeeeno/claude-statusline --print
 ```
 
-`--uninstall` leaves a `statusLine` alone if it points at a different program, so it will not
-clobber another tool's setting.
+`--uninstall` leaves both `settings.json` and the copied directory alone if `statusLine` points at a
+different program, so it will not clobber another tool's setting.
 
 ### Choosing the interpreter
 
@@ -104,7 +117,7 @@ without `/usr/bin/python3` (NixOS, Alpine, some containers) the fallback bakes w
 resolved to at setup time into `settings.json`, where it then runs every minute. Pin it instead:
 
 ```bash
-claude-statusline --install --python /opt/homebrew/bin/python3
+npx @chieeeeno/claude-statusline --install --python /opt/homebrew/bin/python3
 ```
 
 The path is checked before it is written: it must run, and it must report Python 3.8 or newer.

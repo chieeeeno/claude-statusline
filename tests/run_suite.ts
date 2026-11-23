@@ -21,7 +21,7 @@ const FILES: string[] = fs
   .filter((f) => /\.test\.(ts|js)$/.test(f))
   .sort()
   .map((f) => path.join(__dirname, f));
-const MINIMUM = 30;
+const MINIMUM = 50;
 
 if (FILES.length === 0) {
   console.error("claude-statusline: no *.test.ts / *.test.js files found in tests/");

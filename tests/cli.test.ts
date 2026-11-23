@@ -63,8 +63,32 @@ function settingsPath(home: string): string {
   return path.join(home, ".claude", "settings.json");
 }
 
+function claudeInstallDir(home: string): string {
+  return path.join(home, ".claude", "claude-statusline");
+}
+
+function claudeScriptPath(home: string): string {
+  return path.join(claudeInstallDir(home), "statusline.py");
+}
+
+function claudeVersionPath(home: string): string {
+  return path.join(claudeInstallDir(home), "version");
+}
+
 function antigravitySettingsPath(home: string): string {
   return path.join(home, ".gemini", "antigravity-cli", "settings.json");
+}
+
+function antigravityInstallDir(home: string): string {
+  return path.join(home, ".gemini", "antigravity-cli", "claude-statusline");
+}
+
+function antigravityScriptPath(home: string): string {
+  return path.join(antigravityInstallDir(home), "statusline.py");
+}
+
+function antigravityVersionPath(home: string): string {
+  return path.join(antigravityInstallDir(home), "version");
 }
 
 function readSettings(home: string): SettingsJson {
@@ -274,7 +298,10 @@ test("--python は指定したインタプリタを settings.json に焼く", (t
   const home = makeHome(t);
   const r = run(["--install", "--python", REAL_PYTHON], home);
   assert.equal(r.code, 0);
-  assert.equal(readSettings(home).statusLine?.command, `'${REAL_PYTHON}' '${SCRIPT}'`);
+  assert.equal(
+    readSettings(home).statusLine?.command,
+    `'${REAL_PYTHON}' '${claudeScriptPath(home)}'`
+  );
 });
 
 test("--python=<path> の形式も受ける", (t: TestContext) => {
@@ -524,6 +551,7 @@ test("inspectTargetStatus は未導入・導入済み・他ツール設定を判
   const customTarget = {
     ...cli.TARGETS.antigravity,
     settingsPath: () => antigravitySettingsPath(home),
+    installDir: () => antigravityInstallDir(home),
   };
   assert.equal(cli.inspectTargetStatus(customTarget), "not installed");
 
@@ -576,4 +604,271 @@ test("--target all で片方の settings.json が壊れていれば 1 ファイ�
     .readdirSync(path.join(home, ".claude"))
     .filter((f) => f.includes(".bak-"));
   assert.equal(claudeBackups.length, 0);
+});
+
+// --- コピーインストーラ・バージョン・清掃・移行 ------------------------
+
+test("--install は statusline.py と version を ~/.claude/claude-statusline/ にコピーする", (t: TestContext) => {
+  const home = makeHome(t);
+  const r = run(["--install"], home);
+  assert.equal(r.code, 0);
+  const destScript = claudeScriptPath(home);
+  const destVersion = claudeVersionPath(home);
+  assert.equal(fs.readFileSync(destScript, "utf8"), fs.readFileSync(SCRIPT, "utf8"));
+  assert.equal(fs.readFileSync(destVersion, "utf8").trim(), PKG.version);
+  const command = readSettings(home).statusLine?.command ?? "";
+  assert.ok(command.includes(destScript));
+  assert.equal(command.includes(SCRIPT), false);
+});
+
+test("コピー先ディレクトリは 0700、statusline.py は 0700、version は 0600 で一時ファイルを残さない", (t: TestContext) => {
+  const home = makeHome(t);
+  assert.equal(run(["--install"], home).code, 0);
+  const dir = claudeInstallDir(home);
+  assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
+  assert.equal(fs.statSync(claudeScriptPath(home)).mode & 0o777, 0o700);
+  assert.equal(fs.statSync(claudeVersionPath(home)).mode & 0o777, 0o600);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ["statusline.py", "version"]);
+});
+
+test("--install --target antigravity は Antigravity 配下にのみコピーし ~/.claude を作らない", (t: TestContext) => {
+  const home = makeHome(t);
+  const r = run(["--install", "--target", "antigravity"], home);
+  assert.equal(r.code, 0);
+  assert.equal(fs.existsSync(path.join(home, ".claude")), false);
+  const dir = antigravityInstallDir(home);
+  assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
+  assert.equal(fs.statSync(antigravityScriptPath(home)).mode & 0o777, 0o700);
+  assert.equal(fs.statSync(antigravityVersionPath(home)).mode & 0o777, 0o600);
+  assert.equal(fs.readFileSync(antigravityScriptPath(home), "utf8"), fs.readFileSync(SCRIPT, "utf8"));
+  assert.equal(fs.readFileSync(antigravityVersionPath(home), "utf8").trim(), PKG.version);
+  assert.ok((readAntigravitySettings(home).statusLine?.command ?? "").includes(antigravityScriptPath(home)));
+});
+
+test("--install --target all は両ターゲットに独立してコピーし各 settings.json から指す", (t: TestContext) => {
+  const home = makeHome(t);
+  const r = run(["--install", "--target", "all"], home);
+  assert.equal(r.code, 0);
+  assert.ok((readSettings(home).statusLine?.command ?? "").includes(claudeScriptPath(home)));
+  assert.ok(
+    (readAntigravitySettings(home).statusLine?.command ?? "").includes(antigravityScriptPath(home))
+  );
+  assert.equal(fs.readFileSync(claudeScriptPath(home), "utf8"), fs.readFileSync(SCRIPT, "utf8"));
+  assert.equal(
+    fs.readFileSync(antigravityScriptPath(home), "utf8"),
+    fs.readFileSync(SCRIPT, "utf8")
+  );
+});
+
+test("再インストールは一時ファイル経由の rename で原子的に上書きする", (t: TestContext) => {
+  const home = makeHome(t);
+  assert.equal(run(["--install"], home).code, 0);
+  const scriptPath = claudeScriptPath(home);
+  const versionPath = claudeVersionPath(home);
+  // 旧版のファイルが置かれている状態を模擬する
+  fs.writeFileSync(scriptPath, "# old script\n", { mode: 0o644 });
+  fs.writeFileSync(versionPath, "0.9.0\n", { mode: 0o644 });
+  const beforeScriptIno = fs.statSync(scriptPath).ino;
+  const beforeVersionIno = fs.statSync(versionPath).ino;
+
+  assert.equal(run(["--install"], home).code, 0);
+  assert.notEqual(fs.statSync(scriptPath).ino, beforeScriptIno);
+  assert.notEqual(fs.statSync(versionPath).ino, beforeVersionIno);
+  assert.equal(fs.readFileSync(scriptPath, "utf8"), fs.readFileSync(SCRIPT, "utf8"));
+  assert.equal(fs.readFileSync(versionPath, "utf8").trim(), PKG.version);
+  assert.equal(fs.statSync(scriptPath).mode & 0o777, 0o700);
+  assert.equal(fs.statSync(versionPath).mode & 0o777, 0o600);
+  assert.deepEqual(fs.readdirSync(claudeInstallDir(home)).sort(), ["statusline.py", "version"]);
+});
+
+test("installDir がシンボリックリンクや通常ファイルなら settings.json を変えず exit 1", (t: TestContext) => {
+  const home1 = makeHome(t, '{"env":{"FOO":"1"}}');
+  const outside = path.join(home1, "outside-dir");
+  fs.mkdirSync(outside, { recursive: true });
+  fs.symlinkSync(outside, claudeInstallDir(home1));
+  const r1 = run(["--install"], home1);
+  assert.equal(r1.code, 1);
+  assert.match(r1.stderr, /symbolic link/);
+  assert.deepEqual(readSettings(home1), { env: { FOO: "1" } });
+  assert.deepEqual(fs.readdirSync(outside), []);
+
+  const home2 = makeHome(t, '{"env":{"BAR":"2"}}');
+  fs.writeFileSync(claudeInstallDir(home2), "not a dir");
+  const r2 = run(["--install"], home2);
+  assert.equal(r2.code, 1);
+  assert.match(r2.stderr, /not a directory/);
+  assert.deepEqual(readSettings(home2), { env: { BAR: "2" } });
+});
+
+test("コピー先ファイル位置にディレクトリがあると settings.json を変えず exit 1", (t: TestContext) => {
+  const home = makeHome(t, '{"env":{"FOO":"1"}}');
+  fs.mkdirSync(claudeScriptPath(home), { recursive: true });
+  const r = run(["--install"], home);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /is a directory/);
+  assert.deepEqual(readSettings(home), { env: { FOO: "1" } });
+});
+
+test("--target all で片方の installDir がシンボリックリンクなら 1 ファイルも変更しない", (t: TestContext) => {
+  const home = makeHome(t, '{"env":{"FOO":"1"}}');
+  const outside = path.join(home, "outside-agy");
+  fs.mkdirSync(outside, { recursive: true });
+  fs.mkdirSync(path.dirname(antigravityInstallDir(home)), { recursive: true });
+  fs.symlinkSync(outside, antigravityInstallDir(home));
+
+  const r = run(["--install", "--target", "all"], home);
+  assert.equal(r.code, 1);
+  assert.equal(fs.existsSync(claudeInstallDir(home)), false);
+  assert.deepEqual(readSettings(home), { env: { FOO: "1" } });
+  assert.deepEqual(fs.readdirSync(outside), []);
+});
+
+test("--uninstall はコピー済みファイルと空の claude-statusline ディレクトリも消す", (t: TestContext) => {
+  const home = makeHome(t);
+  assert.equal(run(["--install"], home).code, 0);
+  assert.equal(fs.existsSync(claudeInstallDir(home)), true);
+
+  const r = run(["--uninstall"], home);
+  assert.equal(r.code, 0);
+  assert.equal(readSettings(home).statusLine, undefined);
+  assert.equal(fs.existsSync(claudeScriptPath(home)), false);
+  assert.equal(fs.existsSync(claudeVersionPath(home)), false);
+  assert.equal(fs.existsSync(claudeInstallDir(home)), false);
+});
+
+test("--uninstall は claude-statusline 内の無関係なファイルを残して既知ファイルだけ消す", (t: TestContext) => {
+  const home = makeHome(t);
+  assert.equal(run(["--install"], home).code, 0);
+  const extra = path.join(claudeInstallDir(home), "user-note.txt");
+  fs.writeFileSync(extra, "keep me\n");
+
+  const r = run(["--uninstall"], home);
+  assert.equal(r.code, 0);
+  assert.equal(fs.existsSync(claudeScriptPath(home)), false);
+  assert.equal(fs.existsSync(claudeVersionPath(home)), false);
+  assert.equal(fs.readFileSync(extra, "utf8"), "keep me\n");
+});
+
+test("--uninstall --target claude は Antigravity 側のコピー済みファイルと設定を残す", (t: TestContext) => {
+  const home = makeHome(t);
+  assert.equal(run(["--install", "--target", "all"], home).code, 0);
+  assert.equal(run(["--uninstall", "--target", "claude"], home).code, 0);
+
+  assert.equal(readSettings(home).statusLine, undefined);
+  assert.equal(fs.existsSync(claudeInstallDir(home)), false);
+  assert.ok(readAntigravitySettings(home).statusLine);
+  assert.equal(fs.existsSync(antigravityScriptPath(home)), true);
+  assert.equal(fs.existsSync(antigravityVersionPath(home)), true);
+});
+
+test("--uninstall は他ツールの statusLine が入っていればコピー先ディレクトリにも触れない", (t: TestContext) => {
+  const home = makeHome(t);
+  assert.equal(run(["--install"], home).code, 0);
+  const foreign = { type: "command", command: "/usr/local/bin/other-statusline" };
+  fs.writeFileSync(settingsPath(home), JSON.stringify({ statusLine: foreign }));
+
+  const r = run(["--uninstall"], home);
+  assert.equal(r.code, 1);
+  assert.deepEqual(readSettings(home).statusLine, foreign);
+  assert.equal(fs.existsSync(claudeScriptPath(home)), true);
+  assert.equal(fs.existsSync(claudeVersionPath(home)), true);
+});
+
+test("--uninstall は statusLine 欠損時でも孤児ファイルを安全に清掃する", (t: TestContext) => {
+  const home = makeHome(t);
+  assert.equal(run(["--install"], home).code, 0);
+  // 利用者が settings.json から手動で statusLine を消した状況を模擬
+  fs.writeFileSync(settingsPath(home), "{}\n");
+
+  const r = run(["--uninstall"], home);
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /Removed leftover status line files/);
+  assert.equal(fs.existsSync(claudeInstallDir(home)), false);
+});
+
+test("旧グローバルインストール形式の settings.json も導入済みと認識し移行・アンインストールできる", (t: TestContext) => {
+  const home = makeHome(t);
+  const legacyPath =
+    "/Users/example/.volta/tools/image/packages/@chieeeeno/claude-statusline/lib/node_modules/@chieeeeno/claude-statusline/statusline.py";
+  const legacySettings = JSON.stringify({
+    statusLine: {
+      type: "command",
+      command: `'/usr/bin/python3' '${legacyPath}'`,
+      refreshInterval: 60,
+    },
+  });
+  fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
+  fs.writeFileSync(settingsPath(home), legacySettings);
+
+  const customClaude = {
+    ...cli.TARGETS.claude,
+    settingsPath: () => settingsPath(home),
+    installDir: () => claudeInstallDir(home),
+  };
+  assert.equal(cli.inspectTargetStatus(customClaude), "installed");
+
+  // --version は旧方式であることを示す
+  const ver = run(["--version"], home);
+  assert.equal(ver.code, 0);
+  assert.equal(
+    ver.stdout.trim(),
+    `${PKG.version}\ninstalled (Claude Code): legacy (package path)`
+  );
+
+  // --uninstall で旧方式の statusLine を消せる
+  const un = run(["--uninstall"], home);
+  assert.equal(un.code, 0);
+  assert.equal(readSettings(home).statusLine, undefined);
+
+  // 旧方式から --install でコピー方式へ切り替えられる
+  fs.writeFileSync(settingsPath(home), legacySettings);
+  assert.equal(run(["--install"], home).code, 0);
+  assert.ok((readSettings(home).statusLine?.command ?? "").includes(claudeScriptPath(home)));
+  assert.equal(fs.existsSync(claudeScriptPath(home)), true);
+});
+
+test("--version は導入済みターゲットのバージョンを CLI 版に併記する", (t: TestContext) => {
+  const home = makeHome(t);
+  // 未導入時は CLI 版のみ
+  const empty = run(["--version"], home);
+  assert.equal(empty.code, 0);
+  assert.equal(empty.stdout.trim(), PKG.version);
+
+  // 両方導入し、Antigravity 側だけ古いバージョンを模擬する
+  assert.equal(run(["--install", "--target", "all"], home).code, 0);
+  fs.writeFileSync(antigravityVersionPath(home), "2.0.0\n");
+
+  const both = run(["--version"], home);
+  assert.equal(both.code, 0);
+  assert.deepEqual(both.stdout.trim().split("\n"), [
+    PKG.version,
+    `installed (Claude Code): ${PKG.version}`,
+    "installed (Antigravity CLI): 2.0.0",
+  ]);
+});
+
+test("formatTargetMenu は導入済みバージョンを表示する", () => {
+  const menu = cli.formatTargetMenu(
+    "install",
+    { claude: "installed", antigravity: "installed" },
+    { claude: "2.1.0", antigravity: null }
+  );
+  assert.match(menu, /1\) Claude Code \(~\/\.claude\/settings\.json\) \[installed v2\.1\.0\]/);
+  assert.match(
+    menu,
+    /2\) Antigravity CLI \(~\/\.gemini\/antigravity-cli\/settings\.json\) \[installed\]/
+  );
+});
+
+test("settings.json に書かれたコピー先のコマンドで実際にペイロードを描画できる", (t: TestContext) => {
+  const home = makeHome(t);
+  assert.equal(run(["--install", "--python", REAL_PYTHON], home).code, 0);
+  const command = readSettings(home).statusLine?.command ?? "";
+  const rendered = spawnSync("/bin/sh", ["-c", command], {
+    env: { ...process.env, HOME: home },
+    encoding: "utf8",
+    input: '{"model":{"display_name":"Opus 5"},"cwd":"/tmp/demo"}',
+  });
+  assert.equal(rendered.status, 0);
+  assert.match(rendered.stdout, /Opus 5/);
 });

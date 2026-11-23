@@ -16,7 +16,7 @@
 
 `@chieeeeno/claude-statusline` は Claude Code の status line を 3 行で描画する npm パッケージ。
 
-描画エンジンは `statusline.py`（Python、標準ライブラリのみ）。**npm はインストーラとしてのみ使う。** `bin/claude-statusline.js` が `~/.claude/settings.json`（および Antigravity CLI の `~/.gemini/antigravity-cli/settings.json`）に「Python インタプリタの実体パス + パッケージ内 `statusline.py` の絶対パス」を直接書き込むため、**描画時に Node は起動しない**。
+描画エンジンは `statusline.py`（Python、標準ライブラリのみ）。**npm はインストーラとしてのみ使う。** `bin/claude-statusline.js` が `statusline.py` を各ターゲット配下の安定したディレクトリ（`~/.claude/claude-statusline/statusline.py` および `~/.gemini/antigravity-cli/claude-statusline/statusline.py`）へ原子的にコピーし、各 `settings.json` に「Python インタプリタの実体パス + コピー先 `statusline.py` の絶対パス」を直接書き込むため、**描画時に Node は起動しない**（`npx` のキャッシュが消えても動き続ける）。
 
 Claude Code は 300ms のデバウンスで status line を呼ぶ。実測の描画時間は 46ms。競合パッケージはいずれも Node 製で毎描画 100ms 以上を消費しており、そこに勝つことがこのパッケージの存在理由そのものである。
 
@@ -96,7 +96,7 @@ RunCat Neo（メニューバー常駐アプリ）が読む形式なので、キ�
 - 書き込み前に必ずタイムスタンプ付きのバックアップを取る
 - 無関係なキー（`permissions` / `hooks` / `env` など）が書き込み後も残る
 - `--install` は冪等。何度実行しても結果が同じ
-- `--uninstall` は、`command` が自パッケージのパスを含まない `statusLine` を消さない。他ツールが設定したものを黙って壊さないため
+- `--uninstall` は、`command` が自ツールのコピー先パスまたは旧パッケージパスを含まない `statusLine` を消さない（コピー先ディレクトリにも触れない）。他ツールが設定したものを黙って壊さないため。自ツールの設定を消すときはコピー済みファイルも清掃する
 - `settings.json` が壊れた JSON だったとき、上書きせずエラーで停止する
 
 ### 4.8 描画をブロックしない
