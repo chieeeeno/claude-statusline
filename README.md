@@ -125,6 +125,13 @@ bun test           # ローカルで CLI テストだけを素早く回す（要
 
 実行時依存（`dependencies`）はゼロのまま維持している。開発用依存も TypeScript のビルド・型検査に必要な `typescript` と `@types/node` だけに留めており、Python 側は `unittest`、CLI 側は Node 組み込みの `node:test` を使う。どちらの包みも、収集されたテストが想定件数を下回ったら失敗する。空のテストファイルも存在しないテストファイルもそれ自体は exit 0 で通ってしまい、テストを消したことが緑の CI になってしまうため。CLI のテストは毎回使い捨ての `HOME` の中で走るので、実際の `~/.claude` には触れない。
 
+### 開発・リリース用スキル
+
+リポジトリには Claude Code / Antigravity CLI（`.agents/skills.json` 経由で共有）の両方から使える開発・リリース用スキルを同梱している:
+
+- `statusline-review`（[設計書](docs/01-review-skill-design.md)）: PR 差分に対して品質・セキュリティの 2 エージェントで並列レビューと修正ループを回す
+- `statusline-release`（[設計書](docs/03-release-skill-design.md)）: 差分収集・semver 決定・バージョン上げ PR 作成/マージ・`vX.Y.Z` タグプッシュによる OIDC 公開（`.github/workflows/publish.yml`）の監視・GitHub Release 作成までを安全に実行する。ローカルからの `npm publish` 等は `.claude/settings.json`・`.agents/hooks.json`・`package.json` の `prepublishOnly` で多層的にブロックしている
+
 ## ライセンス
 
 MIT
