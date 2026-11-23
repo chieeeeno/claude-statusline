@@ -5,7 +5,7 @@
 [Claude Code](https://claude.com/claude-code) / [Google Antigravity CLI (`agy`)](https://antigravity.google) 用の、速くて依存ゼロの status line。
 
 ```
-📁 my-repo  ⧉ feature-branch
+🤖 Claude Code  📁 my-repo  ⧉ feature-branch
 ⑂ feature/add-search  🧠 Opus 5 (1M)  ⚡ xhigh  📖 Explanatory  🤔 on
 ctx ▓░░░░░░░░░ 10% 98k/1M │ 🔥 5h ▓▓▓▓▓▓▓░░░ 67% ↺2:03 (12:33) │ 📅 7d ▓▓░░░░░░░░ 22% ↺5d (5/23 10:30) │ 💰 $2.69 · 12m
 ```
@@ -60,7 +60,7 @@ npx @chieeeeno/claude-statusline@latest --install
 
 | 行 | 内容 |
 |---|---|
-| 1 | リポジトリ名（`origin` リモート由来）と git worktree 名 |
+| 1 | 起動中のエージェント名（`Claude Code` / `Antigravity`）、リポジトリ名（`origin` リモート由来）、git worktree 名 |
 | 2 | ブランチ、モデル、推論の深さ、出力スタイル、thinking、fast mode |
 | 3 | コンテキスト使用率、5 時間枠、7 日枠、コスト / 経過時間 / 増減行数 |
 

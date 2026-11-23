@@ -250,28 +250,55 @@ def payload(**over):
     return d
 
 
+class TestAgentName(unittest.TestCase):
+    def test_ClaudeCodeペイロードではClaudeCodeを返す(self):
+        self.assertEqual(sl.agent_name(payload()), "Claude Code")
+        self.assertEqual(sl.agent_name({"cwd": "/tmp/demo"}), "Claude Code")
+
+    def test_AntigravityペイロードではAntigravityを返す(self):
+        self.assertEqual(sl.agent_name(antigravity_payload()), "Antigravity")
+        self.assertEqual(sl.agent_name({"product": "antigravity"}), "Antigravity")
+
+    def test_空辞書や非辞書では空文字を返す(self):
+        self.assertEqual(sl.agent_name({}), "")
+        for bad in (None, [], "antigravity", 123):
+            self.assertEqual(sl.agent_name(bad), "", repr(bad))
+
+    def test_productが非文字列でも例外を投げずClaudeCodeを返す(self):
+        for bad in (None, 123, ["antigravity"], {"name": "antigravity"}):
+            self.assertEqual(sl.agent_name({"product": bad}), "Claude Code", repr(bad))
+
+
 class TestLineLocation(unittest.TestCase):
-    def test_リポジトリ名とworktree名を出す(self):
+    def test_エージェント名とリポジトリ名とworktree名を出す(self):
+        out = sl.line_location(payload(), True)
         self.assertEqual(
-            plain(sl.line_location(payload(), True)),
-            "📁 brooklyn-aura  ⧉ fix-DEVT-9189-task-05-followup",
+            plain(out),
+            "🤖 Claude Code  📁 brooklyn-aura  ⧉ fix-DEVT-9189-task-05-followup",
         )
+        # 絵文字自体には色を当てず、エージェント名だけに色を当てる
+        self.assertTrue(out.startswith(f"🤖 {sl.CORAL}Claude Code{sl.RESET}"))
+
+    def test_AntigravityペイロードではAntigravityを紫で出す(self):
+        out = sl.line_location(antigravity_payload(), True)
+        self.assertEqual(plain(out), "🤖 Antigravity  📁 my-project")
+        self.assertTrue(out.startswith(f"🤖 {sl.PURPLE}Antigravity{sl.RESET}"))
 
     def test_メインツリーではworktree部分が消える(self):
         d = payload()
         del d["workspace"]["git_worktree"]
-        self.assertEqual(plain(sl.line_location(d, True)), "📁 brooklyn-aura")
+        self.assertEqual(plain(sl.line_location(d, True)), "🤖 Claude Code  📁 brooklyn-aura")
 
     def test_originがなければディレクトリ名にフォールバックする(self):
         d = payload()
         del d["workspace"]["repo"]
         del d["workspace"]["git_worktree"]
-        self.assertEqual(plain(sl.line_location(d, True)), "📁 brooklyn-aura")
+        self.assertEqual(plain(sl.line_location(d, True)), "🤖 Claude Code  📁 brooklyn-aura")
 
     def test_git外ではチルダ短縮パスを出す(self):
         home = str(Path.home())
         d = payload(workspace={"current_dir": home + "/tmp/scratch"})
-        self.assertEqual(plain(sl.line_location(d, False)), "📁 ~/tmp/scratch")
+        self.assertEqual(plain(sl.line_location(d, False)), "🤖 Claude Code  📁 ~/tmp/scratch")
 
     def test_長いworktree名は切り詰める(self):
         d = payload()
@@ -281,22 +308,22 @@ class TestLineLocation(unittest.TestCase):
     def test_git内でworkspaceがなくてもcwdから名前を取る(self):
         self.assertEqual(
             plain(sl.line_location({"cwd": "/tmp/some-repo"}, True)),
-            "📁 some-repo",
+            "🤖 Claude Code  📁 some-repo",
         )
 
-    def test_名前が取れなければ行ごと消える(self):
+    def test_空ペイロードでは行ごと消える(self):
         self.assertEqual(sl.line_location({}, True), "")
         self.assertEqual(sl.line_location({}, False), "")
 
     def test_名前が取れなくてもworktreeがあれば出す(self):
         d = {"workspace": {"git_worktree": "wt"}}
-        self.assertEqual(plain(sl.line_location(d, True)), "⧉ wt")
+        self.assertEqual(plain(sl.line_location(d, True)), "🤖 Claude Code  ⧉ wt")
 
     def test_リポジトリ名の制御文字を落とす(self):
         d = payload()
         d["workspace"]["repo"]["name"] = "evil\033]52;c;cHdu\007repo"
         del d["workspace"]["git_worktree"]
-        self.assertEqual(plain(sl.line_location(d, True)), "📁 evil]52;c;cHdurepo")
+        self.assertEqual(plain(sl.line_location(d, True)), "🤖 Claude Code  📁 evil]52;c;cHdurepo")
 
     def test_worktree名の制御文字を落とす(self):
         d = payload()
@@ -305,13 +332,24 @@ class TestLineLocation(unittest.TestCase):
 
     def test_ディレクトリ名の制御文字を落とす(self):
         d = payload(workspace={"current_dir": "/tmp/a\033[2Jb"})
-        self.assertEqual(plain(sl.line_location(d, False)), "📁 /tmp/a[2Jb")
+        self.assertEqual(plain(sl.line_location(d, False)), "🤖 Claude Code  📁 /tmp/a[2Jb")
 
     def test_制御文字だけの名前はセグメントごと消える(self):
         d = payload()
         d["workspace"]["repo"]["name"] = "\033\007"
         del d["workspace"]["git_worktree"]
-        self.assertEqual(sl.line_location(d, True), "")
+        out = plain(sl.line_location(d, True))
+        self.assertNotIn("📁", out)
+        self.assertEqual(out, "🤖 Claude Code")
+
+    def test_エージェント名の制御文字もサニタイズする(self):
+        with mock.patch.dict(sl._AGENT_PROFILES, {"evil": ("Ag\033[2Jent\007", sl.PURPLE)}):
+            out = sl.line_location({"product": "evil"}, False)
+            self.assertNotIn("\033[2J", out)
+            self.assertNotIn("\007", out)
+            self.assertEqual(plain(out), "🤖 Ag[2Jent")
+        with mock.patch.dict(sl._AGENT_PROFILES, {"blank": ("\033\007", sl.PURPLE)}):
+            self.assertEqual(sl.line_location({"product": "blank"}, False), "")
 
     def test_切り詰めはサニタイズ後の長さで測る(self):
         # 落とした制御文字が表示幅を食わないこと
@@ -597,6 +635,20 @@ class TestMain(RuncatCase):
         out, _ = run_main("[1,2,3]", HOME=str(self.home))
         self.assertEqual(out, "")
 
+    def test_空のペイロードでも出力が空になる(self):
+        out, err = run_main("{}", HOME=str(self.home))
+        self.assertEqual(out, "")
+        self.assertEqual(err, "")
+
+    def test_ClaudeCodeペイロードの1行目にエージェント名が出る(self):
+        out, err = run_main(json.dumps(payload()), HOME=str(self.home))
+        self.assertEqual(err, "")
+        lines = plain(out).strip().splitlines()
+        self.assertEqual(
+            lines[0],
+            "🤖 Claude Code  📁 brooklyn-aura  ⧉ fix-DEVT-9189-task-05-followup",
+        )
+
     def test_RUNCAT未設定ならファイルを作らない(self):
         # 観点 4.6。既定で他人の環境にファイルを作らない
         run_main(json.dumps(payload()), HOME=str(self.home))
@@ -791,7 +843,7 @@ class TestAntigravitySupport(TZFixture, RuncatCase):
         self.assertEqual(err, "")
         lines = plain(out).strip().splitlines()
         self.assertEqual(len(lines), 3)
-        self.assertEqual(lines[0], "📁 my-project")
+        self.assertEqual(lines[0], "🤖 Antigravity  📁 my-project")
         self.assertEqual(lines[1], "⑂ feat/agy  🧠 Gemini 4 Argon (Medium)  ⚡ medium  ⚙ plan")
         self.assertIn("ctx ", lines[2])
         self.assertIn("📅 7d", lines[2])

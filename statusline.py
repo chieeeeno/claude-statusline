@@ -25,6 +25,14 @@ GRAY = "\033[38;5;245m"
 YELLOW = "\033[38;5;179m"
 GREEN = "\033[38;5;71m"
 BLUE = "\033[38;5;75m"
+CORAL = "\033[38;5;209m"
+PURPLE = "\033[38;5;141m"
+
+# product 値から (表示名, ANSI 色) への対応表。将来他 CLI に対応するときはここへ追加する。
+_AGENT_PROFILES = {
+    "antigravity": ("Antigravity", PURPLE),
+}
+_DEFAULT_AGENT = ("Claude Code", CORAL)
 
 BAR_WIDTH = 10
 SEP = f" {GRAY}│{RESET} "
@@ -72,7 +80,30 @@ def fmt_tokens(n):
 
 def is_antigravity(d):
     """Antigravity CLI 由来のペイロードかどうか。"""
-    return d.get("product") == "antigravity"
+    return isinstance(d, dict) and d.get("product") == "antigravity"
+
+
+def _agent_profile(d):
+    """ペイロードに対応する (エージェント名, ANSI 色) を返す。"""
+    if not isinstance(d, dict) or not d:
+        return "", ""
+    product = d.get("product")
+    if isinstance(product, str) and product in _AGENT_PROFILES:
+        return _AGENT_PROFILES[product]
+    return _DEFAULT_AGENT
+
+
+def agent_name(d):
+    """ペイロードから起動中のエージェント名を返す。
+
+    Antigravity CLI は "product": "antigravity" を送り、Claude Code は
+    product フィールドを持たない。空辞書（破損入力や非辞書からの退避）のときは
+    既存仕様どおり出力を空に保つため空文字を返す。
+
+    @param d status line ペイロード
+    @returns エージェント名（"Claude Code" / "Antigravity"）。空ペイロードなら ""
+    """
+    return _agent_profile(d)[0]
 
 
 def _is_finite_number(value):
@@ -305,7 +336,7 @@ def shorten_home(path):
 
 
 def line_location(d, in_git):
-    """1 行目: 作業対象のリポジトリと worktree。
+    """1 行目: 起動中のエージェント名・作業対象のリポジトリと worktree。
 
     リポジトリ名はパスから推測せず origin リモート由来の値を優先する。
     ディレクトリ構造に依存させないため。
@@ -314,6 +345,12 @@ def line_location(d, in_git):
     @param in_git git リポジトリ内かどうか
     @returns 1 行目の文字列
     """
+    parts = []
+    agent_raw, agent_color = _agent_profile(d)
+    agent = sanitize(agent_raw)
+    if agent:
+        parts.append(f"🤖 {agent_color}{agent}{RESET}")
+
     ws = d.get("workspace") or {}
     name = ((ws.get("repo") or {}).get("name") or "").strip()
     if not name:
@@ -324,7 +361,8 @@ def line_location(d, in_git):
     # 切り詰めより先にサニタイズする。落とした制御文字が表示幅を食わないように
     name = sanitize(name)
     # 名前が取れないときはセグメントごと出さない。データのない枠を描かないため
-    parts = [f"📁 {YELLOW}{name}{RESET}"] if name else []
+    if name:
+        parts.append(f"📁 {YELLOW}{name}{RESET}")
     worktree = sanitize(ws.get("git_worktree") or "")
     if worktree:
         parts.append(f"⧉ {YELLOW}{truncate(worktree, 32)}{RESET}")
@@ -494,10 +532,9 @@ def write_runcat(d):
     antigravity = is_antigravity(d)
     if antigravity:
         out = Path.home() / ".gemini" / "antigravity-cli" / "runcat-usage.json"
-        default_title = "Antigravity"
     else:
         out = Path.home() / ".claude" / "runcat-usage.json"
-        default_title = "Claude Code"
+    default_title = agent_name(d) or _DEFAULT_AGENT[0]
 
     ctx = (d.get("context_window") or {}).get("used_percentage")
 

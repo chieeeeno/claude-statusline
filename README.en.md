@@ -5,7 +5,7 @@
 A fast, dependency-free status line for [Claude Code](https://claude.com/claude-code) and [Google Antigravity CLI (`agy`)](https://antigravity.google).
 
 ```
-📁 my-repo  ⧉ feature-branch
+🤖 Claude Code  📁 my-repo  ⧉ feature-branch
 ⑂ feature/add-search  🧠 Opus 5 (1M)  ⚡ xhigh  📖 Explanatory  🤔 on
 ctx ▓░░░░░░░░░ 10% 98k/1M │ 🔥 5h ▓▓▓▓▓▓▓░░░ 67% ↺2:03 (12:33) │ 📅 7d ▓▓░░░░░░░░ 22% ↺5d (5/23 10:30) │ 💰 $2.69 · 12m
 ```
@@ -78,7 +78,7 @@ you can remove the global package with `npm uninstall -g @chieeeeno/claude-statu
 
 | Line | Content |
 |---|---|
-| 1 | Repository name (from the `origin` remote) and git worktree name |
+| 1 | Active agent name (`Claude Code` / `Antigravity`), repository name (from the `origin` remote), and git worktree name |
 | 2 | Branch, model, reasoning effort, output style, thinking, fast mode |
 | 3 | Context usage, 5-hour window, 7-day window, cost / elapsed time / lines changed |
 
