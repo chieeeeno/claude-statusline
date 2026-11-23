@@ -297,8 +297,26 @@ async function resolveTargets(
   return ["claude"];
 }
 
+function checkSettingsEntry(settingsFile: string): boolean {
+  let lst: fs.Stats;
+  try {
+    lst = fs.lstatSync(settingsFile);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw e;
+  }
+  if (lst.isSymbolicLink() && !fs.existsSync(settingsFile)) {
+    console.error(
+      `claude-statusline: ${settingsFile} is a broken symbolic link; refusing to write through it.`
+    );
+    console.error("  Remove or fix the symbolic link and try again.");
+    process.exit(1);
+  }
+  return true;
+}
+
 function readSettings(settingsFile: string): Settings {
-  if (!fs.existsSync(settingsFile)) return {};
+  if (!checkSettingsEntry(settingsFile)) return {};
   const raw = fs.readFileSync(settingsFile, "utf8");
   if (!raw.trim()) return {};
   let parsed: unknown;
@@ -323,10 +341,30 @@ function readSettings(settingsFile: string): Settings {
 
 function backupSettings(settingsFile: string): string | null {
   if (!fs.existsSync(settingsFile)) return null;
+  const content = fs.readFileSync(settingsFile);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const dest = `${settingsFile}.bak-${stamp}`;
-  fs.copyFileSync(settingsFile, dest);
-  return dest;
+  const base = `${settingsFile}.bak-${stamp}`;
+  // 元ファイルが緩い権限（0644 等）でも、退避ファイルは作成時点で 0600 かつ
+  // 排他作成（O_EXCL）にして、機微情報の露出と同名ファイル／symlink 上書きを防ぐ。
+  const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const dest = attempt === 0 ? base : `${base}-${attempt}`;
+    let fd: number;
+    try {
+      fd = fs.openSync(dest, flags, 0o600);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "EEXIST") continue;
+      throw e;
+    }
+    try {
+      fs.writeFileSync(fd, content);
+    } finally {
+      fs.closeSync(fd);
+    }
+    return dest;
+  }
+  console.error(`claude-statusline: could not create backup file for ${settingsFile}.`);
+  process.exit(1);
 }
 
 // settings.json には env.ANTHROPIC_API_KEY のような機微な設定が入りうる。
@@ -340,9 +378,8 @@ function writeSettings(settingsFile: string, settings: Settings): void {
   });
 }
 
-function installTarget(target: TargetSpec, command: string): void {
+function installTarget(target: TargetSpec, settings: Settings, command: string): void {
   const settingsFile = target.settingsPath();
-  const settings = readSettings(settingsFile);
   const backup = backupSettings(settingsFile);
 
   const entry = target.buildStatusLine(command);
@@ -368,15 +405,20 @@ async function install({
   const command =
     (runcat ? "CLAUDE_STATUSLINE_RUNCAT=1 " : "") + `${shellQuote(python)} ${shellQuote(SCRIPT)}`;
 
-  for (const id of targetIds) {
-    installTarget(TARGETS[id], command);
+  // 書き込み前に全対象の settings.json を読み込み検証し、片方が壊れているときの半適用を防ぐ
+  const prepared = targetIds.map((id) => {
+    const target = TARGETS[id];
+    return { target, settings: readSettings(target.settingsPath()) };
+  });
+
+  for (const { target, settings } of prepared) {
+    installTarget(target, settings, command);
   }
   console.log("Changes take effect without a restart.");
 }
 
-function uninstallTarget(target: TargetSpec): boolean {
+function uninstallTarget(target: TargetSpec, settings: Settings): boolean {
   const settingsFile = target.settingsPath();
-  const settings = readSettings(settingsFile);
   if (settings.statusLine === undefined) {
     console.log(
       `claude-statusline: nothing to uninstall for ${target.label} (no statusLine entry).`
@@ -405,9 +447,14 @@ function uninstallTarget(target: TargetSpec): boolean {
 
 async function uninstall(explicitTarget: TargetSelection | null): Promise<void> {
   const targetIds = await resolveTargets("uninstall", explicitTarget);
+  // 書き込み前に全対象の settings.json を読み込み検証し、片方が壊れているときの半適用を防ぐ
+  const prepared = targetIds.map((id) => {
+    const target = TARGETS[id];
+    return { target, settings: readSettings(target.settingsPath()) };
+  });
   let ok = true;
-  for (const id of targetIds) {
-    if (!uninstallTarget(TARGETS[id])) ok = false;
+  for (const { target, settings } of prepared) {
+    if (!uninstallTarget(target, settings)) ok = false;
   }
   if (!ok) process.exit(1);
 }

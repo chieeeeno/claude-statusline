@@ -460,6 +460,28 @@ def runcat_enabled():
     return bool(os.environ.get("CLAUDE_STATUSLINE_RUNCAT"))
 
 
+def _mkdir_private(directory):
+    """未存在のディレクトリを親から順に 0o700 で作成する。
+
+    Path.mkdir(parents=True, mode=0o700) は中間親ディレクトリに mode を
+    適用しないため、未存在の祖先を辿って 1 階層ずつ作成する。
+    既存ディレクトリのパーミッションは変更しない。
+    """
+    missing = []
+    cur = directory
+    while not cur.exists():
+        missing.append(cur)
+        parent = cur.parent
+        if parent == cur:
+            break
+        cur = parent
+    for d in reversed(missing):
+        try:
+            d.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+
+
 def write_runcat(d):
     """RunCat Neo が読む使用量スナップショットを書き出す。
 
@@ -511,7 +533,7 @@ def write_runcat(d):
     if ctx is not None:
         snapshot["metricsBarValue"] = f"{ctx:g}%"
 
-    out.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir_private(out.parent)
     fd, tmp = tempfile.mkstemp(prefix=".runcat-", dir=str(out.parent))
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(snapshot, f, ensure_ascii=False)

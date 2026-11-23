@@ -539,3 +539,41 @@ test("inspectTargetStatus は未導入・導入済み・他ツール設定を判
   assert.equal(run(["--install", "--target", "antigravity"], home).code, 0);
   assert.equal(cli.inspectTargetStatus(customTarget), "installed");
 });
+
+test("バックアップファイルは元ファイルが 0644 でも 0600 で作成される", (t: TestContext) => {
+  const home = makeHome(t);
+  writeAntigravitySettings(home, '{"env":{"SECRET":"1"}}');
+  const agyFile = antigravitySettingsPath(home);
+  fs.chmodSync(agyFile, 0o644);
+  const r = run(["--install", "--target", "antigravity"], home);
+  assert.equal(r.code, 0);
+  const dir = path.dirname(agyFile);
+  const backups = fs.readdirSync(dir).filter((f) => f.includes(".bak-"));
+  assert.equal(backups.length, 1);
+  assert.equal(fs.statSync(path.join(dir, backups[0]!)).mode & 0o777, 0o600);
+});
+
+test("settings.json が壊れたシンボリックリンクなら外部ファイルを作らず exit 1", (t: TestContext) => {
+  const home = makeHome(t);
+  const agyFile = antigravitySettingsPath(home);
+  const outside = path.join(home, "outside-dangling.json");
+  fs.mkdirSync(path.dirname(agyFile), { recursive: true });
+  fs.symlinkSync(outside, agyFile);
+  const r = run(["--install", "--target", "antigravity"], home);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /broken symbolic link/);
+  assert.equal(fs.existsSync(outside), false);
+});
+
+test("--target all で片方の settings.json が壊れていれば 1 ファイルも変更しない", (t: TestContext) => {
+  const home = makeHome(t, '{"env":{"FOO":"1"}}');
+  writeAntigravitySettings(home, "{broken");
+  const r = run(["--install", "--target", "all"], home);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /is not valid JSON/);
+  assert.equal(fs.readFileSync(settingsPath(home), "utf8"), '{"env":{"FOO":"1"}}');
+  const claudeBackups = fs
+    .readdirSync(path.join(home, ".claude"))
+    .filter((f) => f.includes(".bak-"));
+  assert.equal(claudeBackups.length, 0);
+});

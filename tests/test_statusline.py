@@ -765,6 +765,9 @@ class TestAntigravitySupport(TZFixture, RuncatCase):
         agy_out = self.home / ".gemini" / "antigravity-cli" / "runcat-usage.json"
         self.assertTrue(agy_out.is_file())
         self.assertFalse(self.out.exists())
+        self.assertEqual((self.home / ".gemini").stat().st_mode & 0o777, 0o700)
+        self.assertEqual(agy_out.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(agy_out.stat().st_mode & 0o777, 0o600)
         snap = json.loads(agy_out.read_text(encoding="utf-8"))
         stamp = snap.pop("lastUpdatedDate")
         self.assertRegex(stamp, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
