@@ -163,8 +163,8 @@ worked examples, not text to copy.
 
 Count findings that are **Blocker** or **Security: High or above**.
 
-- **Zero** → post the LGTM summary from `docs/01` and stop. Done.
-- **Non-zero, and this was round 3** → post the 打ち切り summary. **Do not post LGTM.** Stop.
+- **Zero** → post the LGTM summary from `docs/01`, update the PR description with the final review summary (see 4g), and stop. Done.
+- **Non-zero, and this was round 3** → post the 打ち切り summary (**Do not post LGTM**), update the PR description with the final review summary (see 4g), and stop.
 - **Non-zero, rounds 1–2** → continue to 4e.
 
 ### 4e. Fix, then go around again
@@ -240,6 +240,24 @@ The reply follows this shape:
 finding that is still live is worse than never reporting it. Findings you deliberately left
 unfixed — Should fix, Consider, Medium, Low — stay open. They are decisions to defer, not
 problems that went away.
+
+### 4g. Record the final review result in the PR description
+
+When the review loop finishes (either **LGTM** or **3 周で打ち切り**), update the PR description
+(`body`) itself so readers can see the outcome, findings, and LGTM status directly at the top of
+the PR without hunting through the timeline.
+
+1. Fetch the current PR body with `gh pr view <number> --json body -q .body`
+2. Append — or replace in place if already present — a section delimited by HTML comments:
+   `<!-- statusline-review:start -->` and `<!-- statusline-review:end -->`
+3. Follow the 「PR 本文のレビュー結果セクション」 template in `docs/01-review-skill-design.md`,
+   including:
+   - Final verdict (`✅ LGTM（第 N 周で完了）` or `⚠️ 3 周で打ち切り（未解決の指摘あり）`)
+   - Severity summary table (Blocker / Critical / High / Should fix / Medium / Consider / Low)
+   - All findings with severity, `file:line`, summary, and status (修正済み / 任意対応 / 未解決)
+   - Key measured verification results and the link to the posted PR review
+4. Apply with `gh pr edit <number> --body-file <file>` (never drop existing PR description content
+   outside the marker comments)
 
 ## Rules that hold throughout
 

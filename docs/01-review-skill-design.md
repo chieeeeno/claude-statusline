@@ -69,8 +69,8 @@ handover/                         .gitignore で除外（手元にのみ残す�
 | b | 各エージェントは検証を自分で走らせ、**裏付けの取れた指摘だけ**を所定のファイルに書き出す |
 | c | 両方のレポートを受け取ったら**2 エージェントを停止する**。そのうえで `file:line` で重複排除し、重大度順に統合する |
 | d | 行単位インラインコメントと総評を PR に投稿する |
-| e | **Blocker とセキュリティ High 以上が 0 件なら** LGTM 総評を投稿して終了する |
-| f | 残っていれば修正 → `npm test` → コミット → push → 次の周へ |
+| e | **Blocker とセキュリティ High 以上が 0 件なら** LGTM 総評を投稿し、PR 本文に最終レビュー結果（LGTM・指摘一覧・検証結果）を追記・更新して終了する |
+| f | 残っていれば修正 → `bun run typecheck && bun run test` → コミット → push → 次の周へ（3 周目で残った場合は打ち切り総評を投稿し、PR 本文にも未解決の指摘を追記して終了） |
 | g | 修正した指摘のスレッドに返信し、**解決済みにして折りたたむ** |
 
 修正対象は **Blocker とセキュリティ High 以上に限る**。Should fix 以下と Medium 以下は報告するだけでループを回さない。ここを緩めるとリリースに関係のない改善で永久に回り続ける。
@@ -234,6 +234,37 @@ Blocker とセキュリティ High 以上の指摘はありません。
 ```
 
 重大度ラベルは `[Blocker]` / `[Should fix]` / `[Consider]`、セキュリティ側は `[Security: Critical]` / `[Security: High]` / `[Security: Medium]` / `[Security: Low]` を使う。
+
+### PR 本文のレビュー結果セクション
+
+レビュー完了時（LGTM または 3 周打ち切り時）に、PR 本文の末尾へ以下のブロックを追記する（再実行時は `<!-- statusline-review:start -->` 〜 `<!-- statusline-review:end -->` の間を冪等に置換し、既存の PR 本文は消さない）。
+
+```markdown
+<!-- statusline-review:start -->
+## 🔍 レビュー結果
+
+- **判定**: ✅ LGTM（第 N 周で完了）
+- **レビュー**: <PR レビュー URL>
+
+| 重大度 | 品質 | セキュリティ |
+| --- | --- | --- |
+| Blocker / Critical | 0 | 0 |
+| High | — | 0 |
+| Should fix / Medium | 0 | 0 |
+| Consider / Low | 0 | 0 |
+
+### 指摘内容と対応状況
+- **[Security: Medium]** `file:line` — 一文の要約（任意対応）
+- **[Blocker]** `file:line` — 一文の要約（第 1 周で修正済み `<短縮 SHA>`）
+
+### 検証結果
+- `bun run typecheck`: OK
+- `bun run test`: 133 件 / OK
+- 描画時間: 10 回 0.38 秒（1 回あたり 38ms）
+<!-- statusline-review:end -->
+```
+
+3 周打ち切り時は判定を `⚠️ 3 周で打ち切り（未解決の指摘あり / LGTM なし）` とし、未解決の指摘を明記する。
 
 ## スコープ外
 
