@@ -1,0 +1,167 @@
+name: publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# 既定権限は読み取りのみ。OIDC 発行権限は publish ジョブ単体に限定する。
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # test.yml の全検査（Python テスト・3.8 互換・型検査・CLI/npx E2E・tarball 検査）を
+  # そのまま再利用し、CI を通っていないコミットのタグで公開されるのを防ぐ。
+  verify:
+    uses: ./.github/workflows/test.yml
+
+  # bin/claude-statusline.js は git 未管理のため、権限を持たないジョブでビルドして
+  # SHA-256 とともに publish ジョブへ渡す。publish ジョブ内にサードパーティ Action
+  # （oven-sh/setup-bun）や bun install / tsc 実行を入れないための分離。
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      bin_sha256: ${{ steps.digest.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install dev dependencies and build
+        run: bun install --frozen-lockfile && bun run build
+      - name: Compute build artifact digest
+        id: digest
+        run: |
+          set -euo pipefail
+          SHA="$(sha256sum bin/claude-statusline.js | awk '{print $1}')"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-bin
+          path: bin/claude-statusline.js
+          if-no-files-found: error
+          retention-days: 1
+
+  # npm への公開権限（id-token: write）を持つジョブ。
+  # サードパーティ Action と依存インストールを実行せず、公式 actions/* のみで構成する。
+  # environment: npm を明示し、GitHub Settings 側で v* タグのみに制限したうえで
+  # npmjs.com の Trusted Publisher にも同一 Environment 名を登録することで、
+  # 保護外ブランチ上のワークフロー改変による OIDC トークン発行・公開を防ぐ。
+  publish:
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # registry-url を渡すと setup-node が .npmrc に _authToken=${NODE_AUTH_TOKEN} を
+      # 書き込むため、デフォルトの npm レジストリへ OIDC 公開する際は指定しない。
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cli-bin
+          path: bin
+      - name: Verify built binary integrity and restore executable bit
+        env:
+          EXPECTED_SHA256: ${{ needs.build.outputs.bin_sha256 }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$EXPECTED_SHA256" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "Invalid SHA-256 digest: $EXPECTED_SHA256" >&2
+            exit 1
+          fi
+          # zip 展開時に落ちる実行ビットを復元する
+          chmod 755 bin/claude-statusline.js
+          printf '%s  %s\n' "$EXPECTED_SHA256" "bin/claude-statusline.js" | sha256sum -c -
+      - name: Verify npm CLI meets Trusted Publishing minimum version (>= 11.5.1)
+        run: |
+          node <<'EOF'
+          const { execFileSync } = require("node:child_process");
+          const ver = execFileSync("npm", ["--version"], { encoding: "utf8" }).trim();
+          const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(ver);
+          if (!match) {
+            console.error(`unexpected npm version format: ${ver}`);
+            process.exit(1);
+          }
+          const parts = [Number(match[1]), Number(match[2]), Number(match[3])];
+          const min = [11, 5, 1];
+          let ok = true;
+          for (let i = 0; i < 3; i++) {
+            if (parts[i] !== min[i]) { ok = parts[i] > min[i]; break; }
+          }
+          console.log(`npm version: ${ver}`);
+          if (!ok) {
+            console.error(`npm >= 11.5.1 is required for Trusted Publishing, got ${ver}`);
+            process.exit(1);
+          }
+          EOF
+      - name: Verify git tag matches package.json version
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE:-}" != "tag" ]; then
+            echo "Expected tag ref, got GITHUB_REF_TYPE=${GITHUB_REF_TYPE:-<unset>}" >&2
+            exit 1
+          fi
+          if ! printf '%s' "${GITHUB_REF_NAME:-}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Tag must match stable semver vX.Y.Z, got: ${GITHUB_REF_NAME:-<unset>}" >&2
+            exit 1
+          fi
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "Version mismatch: tag=$TAG package.json=$PKG" >&2
+            exit 1
+          fi
+          echo "Version verified: $PKG"
+      - name: Verify tarball contents immediately before publish
+        run: |
+          set -euo pipefail
+          PACK_JSON="$(npm pack --dry-run --ignore-scripts --json)"
+          PACK_JSON="$PACK_JSON" node <<'EOF'
+          const pkg = require("./package.json");
+          const entries = JSON.parse(process.env.PACK_JSON)[0].files;
+          const paths = entries.map((f) => f.path).sort();
+          const expected = [
+            "LICENSE",
+            "README.en.md",
+            "README.md",
+            "package.json",
+            "statusline.py",
+            ...Object.values(pkg.bin),
+          ].sort();
+          const fail = (msg) => { console.error(msg); process.exitCode = 1; };
+
+          if (JSON.stringify(paths) !== JSON.stringify(expected)) {
+            fail(`unexpected tarball files:\n  expected: ${expected.join(", ")}\n  actual:   ${paths.join(", ")}`);
+          }
+          if (pkg.dependencies && Object.keys(pkg.dependencies).length) {
+            fail("dependencies must be empty");
+          }
+          if (pkg.publishConfig?.access !== "public") {
+            fail("publishConfig.access must be public");
+          }
+          if (JSON.stringify(pkg.os) !== JSON.stringify(["darwin", "linux"])) {
+            fail("os must be [darwin, linux], got " + JSON.stringify(pkg.os));
+          }
+          const notExecutable = entries
+            .filter((f) => /\.(py|js)$/.test(f.path) && !(f.mode & 0o111))
+            .map((f) => f.path);
+          if (notExecutable.length) {
+            fail("not executable: " + notExecutable.join(", "));
+          }
+          if (!process.exitCode) console.log("pre-publish tarball ok: " + paths.join(", "));
+          EOF
+      # NODE_AUTH_TOKEN は渡さない（OIDC Trusted Publishing が自動で短命トークンを取得し、
+      # Provenance も自動付与される）。bin/claude-statusline.js は検証済みのため
+      # --ignore-scripts で prepack（tsc）の再実行を抑止する。
+      - name: Publish to npm via Trusted Publishing (OIDC)
+        run: npm publish --ignore-scripts
