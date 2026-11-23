@@ -153,6 +153,13 @@ bun test           # fast local CLI test run (requires build first)
 
 Runtime `dependencies` remain empty. `devDependencies` are kept to `typescript` and `@types/node` for compiling and type-checking the setup CLI; the Python suite uses `unittest` and the CLI suite uses Node's built-in `node:test` runner. Both wrappers fail when the suite collects fewer tests than expected — an empty or missing test file exits 0 on its own, which would otherwise turn a deleted suite into a green CI run. Every CLI test runs against a throwaway `HOME`, so your real `~/.claude` is never touched.
 
+### Development & Release Skills
+
+The repository includes skills shared across Claude Code and Antigravity CLI (via `.agents/skills.json`):
+
+- `statusline-review` ([design doc](docs/01-review-skill-design.md)): runs parallel quality and security review agents over a PR diff with an automated fix-and-re-review loop
+- `statusline-release` ([design doc](docs/03-release-skill-design.md)): runs the end-to-end release flow — collecting unreleased changes, choosing a stable semver version, opening/merging the version-bump PR, pushing a `vX.Y.Z` tag to trigger OIDC Trusted Publishing (`.github/workflows/publish.yml`), verifying npm publication, and creating the GitHub Release. Local `npm publish` (and `bun`/`pnpm`/`yarn publish`) is blocked at multiple layers via `.claude/settings.json`, `.agents/hooks.json`, and `package.json` `prepublishOnly`.
+
 ## License
 
 MIT

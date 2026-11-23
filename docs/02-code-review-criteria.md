@@ -171,7 +171,7 @@ status line のペイロードには `session_id`、`transcript_path`、`cwd` �
 
 ### 5.3 サプライチェーン（npm 公開物）
 
-- `postinstall` / `preinstall` / `prepare` のようなインストール時に走るライフサイクルスクリプトが**存在しないこと**。インストールしただけでコードが走る構造にしない（`prepack` は `npm pack` / `npm publish` 時のみ走るため許容）
+- `postinstall` / `preinstall` / `prepare` のようなインストール時に走るライフサイクルスクリプトが**存在しないこと**。インストールしただけでコードが走る構造にしない（`prepack` とローカル誤公開抑止用の `prepublishOnly` はインストール時に走らないため許容）
 - `dependencies` が空であること。依存が増えた時点で、その依存の乗っ取りリスクを引き受けることになる
 - `files` が最小であること。意図しないファイルが公開物に入っていないか
 - パッケージ名が既存パッケージの typosquat と誤解される形になっていないか

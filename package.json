@@ -23,6 +23,7 @@
     "build": "tsc -p tsconfig.build.json && chmod +x bin/claude-statusline.js",
     "typecheck": "tsc --noEmit",
     "prepack": "npm run build",
+    "prepublishOnly": "node -e \"console.error('Local publish is disabled. Push a vX.Y.Z tag to publish via GitHub Actions OIDC (.github/workflows/publish.yml).'); process.exit(1)\"",
     "test": "bun run test:py && bun run test:js",
     "test:py": "python3 tests/run_suite.py",
     "test:js": "bun run build && node tests/run_suite.ts"
