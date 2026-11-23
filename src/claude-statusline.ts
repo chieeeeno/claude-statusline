@@ -30,6 +30,12 @@ interface Settings {
 type TargetId = "claude" | "antigravity";
 type TargetSelection = TargetId | "all";
 type InstallStatus = "installed" | "not installed" | "other";
+type OwnStatusLineKind = "copied" | "legacy";
+
+interface TargetInspection {
+  status: InstallStatus;
+  kind: OwnStatusLineKind | null;
+}
 
 interface TargetSpec {
   id: TargetId;
@@ -215,25 +221,32 @@ function requirePython(explicit: string | null): string {
 }
 
 /**
- * settings.json 内の statusLine が自パッケージ（コピー先または旧パッケージ直指し）を
- * 指しているか判定する。
+ * settings.json 内の statusLine が自ツールのコピー先か旧パッケージ直指しかを判定する。
  *
  * 引用ありの新形式と、引用なしで書かれた旧バージョンの設定の両方を認識する。
  * パスに ' を含む場合は引用時にエスケープされ、生のパスでは一致しないため。
  */
-function isOwnStatusLine(statusLine: unknown, target: TargetSpec): boolean {
+function classifyOwnStatusLine(statusLine: unknown, target: TargetSpec): OwnStatusLineKind | null {
   if (statusLine === null || typeof statusLine !== "object" || Array.isArray(statusLine)) {
-    return false;
+    return null;
   }
   const current = String((statusLine as { command?: unknown }).command || "");
   const installedScript = targetScriptPath(target);
-  return (
-    current.includes(installedScript) ||
-    current.includes(shellQuote(installedScript)) ||
+  if (current.includes(installedScript) || current.includes(shellQuote(installedScript))) {
+    return "copied";
+  }
+  if (
     current.includes(SCRIPT) ||
     current.includes(shellQuote(SCRIPT)) ||
     LEGACY_PACKAGE_SCRIPT_RE.test(current)
-  );
+  ) {
+    return "legacy";
+  }
+  return null;
+}
+
+function isOwnStatusLine(statusLine: unknown, target: TargetSpec): boolean {
+  return classifyOwnStatusLine(statusLine, target) !== null;
 }
 
 /** ターゲット配下に記録されたインストール済みバージョンを読む。読めなければ null。 */
@@ -265,24 +278,30 @@ function readInstalledVersion(target: TargetSpec): string | null {
   }
 }
 
-/** 選択メニュー表示用に対象の現在の導入状態を調べる（ファイル破損で終了しない）。 */
-function inspectTargetStatus(target: TargetSpec): InstallStatus {
+/** 選択メニュー・バージョン表示用に対象の導入状態と方式を調べる（ファイル破損で終了しない）。 */
+function inspectTargetDetail(target: TargetSpec): TargetInspection {
   const settingsFile = target.settingsPath();
-  if (!fs.existsSync(settingsFile)) return "not installed";
+  if (!fs.existsSync(settingsFile)) return { status: "not installed", kind: null };
   let parsed: unknown;
   try {
     const raw = fs.readFileSync(settingsFile, "utf8");
-    if (!raw.trim()) return "not installed";
+    if (!raw.trim()) return { status: "not installed", kind: null };
     parsed = JSON.parse(raw);
   } catch {
-    return "not installed";
+    return { status: "not installed", kind: null };
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return "not installed";
+    return { status: "not installed", kind: null };
   }
   const statusLine = (parsed as Settings).statusLine;
-  if (statusLine === undefined) return "not installed";
-  return isOwnStatusLine(statusLine, target) ? "installed" : "other";
+  if (statusLine === undefined) return { status: "not installed", kind: null };
+  const kind = classifyOwnStatusLine(statusLine, target);
+  return kind ? { status: "installed", kind } : { status: "other", kind: null };
+}
+
+/** 選択メニュー表示用に対象の現在の導入状態を調べる（ファイル破損で終了しない）。 */
+function inspectTargetStatus(target: TargetSpec): InstallStatus {
+  return inspectTargetDetail(target).status;
 }
 
 function statusBadge(status: InstallStatus, version?: string | null): string {
@@ -316,14 +335,18 @@ function parseTargetChoice(input: string): TargetId[] | null {
 }
 
 async function promptTargetSelection(action: "install" | "uninstall"): Promise<TargetId[]> {
+  const details: Record<TargetId, TargetInspection> = {
+    claude: inspectTargetDetail(TARGETS.claude),
+    antigravity: inspectTargetDetail(TARGETS.antigravity),
+  };
   const statuses: Record<TargetId, InstallStatus> = {
-    claude: inspectTargetStatus(TARGETS.claude),
-    antigravity: inspectTargetStatus(TARGETS.antigravity),
+    claude: details.claude.status,
+    antigravity: details.antigravity.status,
   };
   const versions: Record<TargetId, string | null> = {
-    claude: statuses.claude === "installed" ? readInstalledVersion(TARGETS.claude) : null,
+    claude: details.claude.kind === "copied" ? readInstalledVersion(TARGETS.claude) : null,
     antigravity:
-      statuses.antigravity === "installed" ? readInstalledVersion(TARGETS.antigravity) : null,
+      details.antigravity.kind === "copied" ? readInstalledVersion(TARGETS.antigravity) : null,
   };
   console.log(formatTargetMenu(action, statuses, versions));
 
@@ -685,9 +708,14 @@ function printVersion(): void {
   console.log(packageVersion());
   for (const id of ["claude", "antigravity"] as const) {
     const target = TARGETS[id];
-    if (inspectTargetStatus(target) !== "installed") continue;
-    const installed = readInstalledVersion(target);
-    console.log(`installed (${target.label}): ${installed ?? "legacy (package path)"}`);
+    const detail = inspectTargetDetail(target);
+    if (detail.status !== "installed") continue;
+    if (detail.kind === "legacy") {
+      console.log(`installed (${target.label}): legacy (package path)`);
+    } else {
+      const installed = readInstalledVersion(target);
+      console.log(`installed (${target.label}): ${installed ?? "unknown"}`);
+    }
   }
 }
 
@@ -799,6 +827,7 @@ export {
   verifiedExecutable,
   resolvePython,
   readInstalledVersion,
+  inspectTargetDetail,
   inspectTargetStatus,
   formatTargetMenu,
   parseTargetChoice,

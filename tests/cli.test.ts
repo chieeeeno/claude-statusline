@@ -847,6 +847,53 @@ test("--version は導入済みターゲットのバージョンを CLI 版に�
   ]);
 });
 
+test("--version と inspectTargetDetail はコピー方式の version 欠損と旧方式＋残存 version を正しく区別する", (t: TestContext) => {
+  const home = makeHome(t);
+  assert.equal(run(["--install"], home).code, 0);
+
+  // 1. コピー方式だが version ファイルが欠損している場合は unknown（legacy と誤認しない）
+  fs.unlinkSync(claudeVersionPath(home));
+  const customClaude = {
+    ...cli.TARGETS.claude,
+    settingsPath: () => settingsPath(home),
+    installDir: () => claudeInstallDir(home),
+  };
+  assert.deepEqual(cli.inspectTargetDetail(customClaude), {
+    status: "installed",
+    kind: "copied",
+  });
+  const missingVer = run(["--version"], home);
+  assert.equal(missingVer.code, 0);
+  assert.deepEqual(missingVer.stdout.trim().split("\n"), [
+    PKG.version,
+    "installed (Claude Code): unknown",
+  ]);
+
+  // 2. 旧パッケージ直指しへ切り戻した状態で version ファイルが残存していても legacy 扱いとする
+  fs.writeFileSync(claudeVersionPath(home), "2.0.0\n");
+  fs.writeFileSync(
+    settingsPath(home),
+    JSON.stringify({
+      statusLine: {
+        type: "command",
+        command:
+          "'/usr/bin/python3' '/usr/local/lib/node_modules/@chieeeeno/claude-statusline/statusline.py'",
+        refreshInterval: 60,
+      },
+    })
+  );
+  assert.deepEqual(cli.inspectTargetDetail(customClaude), {
+    status: "installed",
+    kind: "legacy",
+  });
+  const reverted = run(["--version"], home);
+  assert.equal(reverted.code, 0);
+  assert.deepEqual(reverted.stdout.trim().split("\n"), [
+    PKG.version,
+    "installed (Claude Code): legacy (package path)",
+  ]);
+});
+
 test("formatTargetMenu は導入済みバージョンを表示する", () => {
   const menu = cli.formatTargetMenu(
     "install",
