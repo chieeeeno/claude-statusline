@@ -12,22 +12,23 @@ ctx ▓░░░░░░░░░ 10% 98k/1M │ 🔥 5h ▓▓▓▓▓▓▓�
 
 ## なぜもう 1 つ status line を作ったのか
 
-- **描画時に Node を起動しない。** 描画は Python が担当する（約 40ms）。Node を使うのはセットアップ時に設定を書き込むときだけ。Node 製の status line は再描画のたびに 100ms 以上を起動に費やすが、Claude Code / Antigravity CLI のデバウンスは 300ms しかない
+- **描画時に Node を起動しない。** 描画は Python が担当する（約 40ms）。Node を使うのはセットアップ時に `statusline.py` をコピーして設定を書き込むときだけ。Node 製の status line は再描画のたびに 100ms 以上を起動に費やすが、Claude Code / Antigravity CLI のデバウンスは 300ms しかない
 - **レート制限枠・クォータが見える。** 5 時間枠と 7 日枠（Antigravity CLI の `quota` バケットを含む）の使用率を、リセットまでの残り時間とリセット時刻（`↺2:03 (12:33)`）と一緒に出す。作業を続けるか切り上げるかを判断できる。時刻はローカルタイムゾーンで、日をまたぐ場合は日付も付く
 - **依存ゼロ。** Python 標準ライブラリのみ
 
 ## インストール
 
 ```bash
-npm install -g @chieeeeno/claude-statusline
-claude-statusline --install
+npx @chieeeeno/claude-statusline --install
 ```
+
+グローバルインストールは不要。`statusline.py` を各 CLI 配下の安定した場所（Claude Code は `~/.claude/claude-statusline/statusline.py`、Antigravity CLI は `~/.gemini/antigravity-cli/claude-statusline/statusline.py`）へ原子的にコピーし、`settings.json` からそのコピー先を直接実行する。`npx` のキャッシュが消えても動作し続け、描画時に Node は起動しない。
 
 対話端末（TTY）で `--install` を実行すると、各 CLI の導入状態を表示した選択メニューが出る:
 
 ```
 Select target to install statusLine:
-  1) Claude Code (~/.claude/settings.json) [installed]
+  1) Claude Code (~/.claude/settings.json) [installed v2.1.0]
   2) Antigravity CLI (~/.gemini/antigravity-cli/settings.json) [not installed]
   3) Both
 Enter choice [1-3] (default: 1):
@@ -38,18 +39,22 @@ Enter choice [1-3] (default: 1):
 非対話環境やスクリプトからは `--target` で明示できる（非 TTY で省略した場合は後方互換のため `claude` が選ばれる）:
 
 ```bash
-claude-statusline --install --target claude
-claude-statusline --install --target antigravity
-claude-statusline --install --target all
+npx @chieeeeno/claude-statusline --install --target claude
+npx @chieeeeno/claude-statusline --install --target antigravity
+npx @chieeeeno/claude-statusline --install --target all
 ```
 
-更新:
+### 更新
 
 ```bash
-npm update -g @chieeeeno/claude-statusline
+npx @chieeeeno/claude-statusline@latest --install
 ```
 
-`--install` をやり直す必要はない。設定はパッケージのディレクトリを指しているので、新しい版がそのまま効く。
+`statusline.py` は各 CLI 配下へコピーされるため、最新版へ更新する際は `--install` を再実行する（コピー先のスクリプトは一時ファイル経由の `rename` で原子的に置き換わり、バージョンも記録される）。
+
+### 旧バージョン（グローバルインストール）からの移行
+
+以前の `npm install -g @chieeeeno/claude-statusline` による設定（パッケージディレクトリを直接指す `settings.json`）はそのままでも壊れず動き続ける。`npx @chieeeeno/claude-statusline@latest --install` を実行すると新しいコピー方式へ切り替わり、その後は `npm uninstall -g @chieeeeno/claude-statusline` でグローバルパッケージを削除してよい。
 
 ## 表示するもの
 
@@ -66,10 +71,10 @@ npm update -g @chieeeeno/claude-statusline
 ## コマンド
 
 ```
-claude-statusline --install [--target <target>] [--runcat]  settings.json に statusLine を書き込む
-claude-statusline --uninstall [--target <target>]           statusLine の項目を消す
-claude-statusline --print                                   stdin のペイロードを描画する（デバッグ用）
-claude-statusline --version                                 バージョンを出す
+npx @chieeeeno/claude-statusline --install [--target <target>] [--runcat]  statusline.py をコピーして settings.json に書き込む
+npx @chieeeeno/claude-statusline --uninstall [--target <target>]           statusLine の項目とコピー済みファイルを消す
+npx @chieeeeno/claude-statusline --print                                   stdin のペイロードを描画する（デバッグ用）
+npx @chieeeeno/claude-statusline --version                                 CLI 版と各ターゲットの導入済み版を出す
 ```
 
 `--target` には `claude`・`antigravity`・`all` を指定できる。TTY 上で省略すると対象選択メニューが出る。
@@ -78,17 +83,17 @@ claude-statusline --version                                 バージョンを�
 
 ```bash
 echo '{"model":{"display_name":"Opus 5"},"context_window":{"used_percentage":25,"total_input_tokens":50000,"context_window_size":200000}}' \
-  | claude-statusline --print
+  | npx @chieeeeno/claude-statusline --print
 ```
 
-`--uninstall` は、`statusLine` が別のプログラムを指していれば手を付けない。他のツールの設定を黙って壊さないため。
+`--uninstall` は、`statusLine` が別のプログラムを指していれば設定にもコピー先ディレクトリにも手を付けない。他のツールの設定を黙って壊さないため。
 
 ### インタプリタを指定する
 
 セットアップは `/usr/bin/python3` を最優先し、無ければ `PATH` 上の最初の `python3` に落ちる。`/usr/bin/python3` を持たない環境（NixOS、Alpine、一部のコンテナ）では、セットアップ時点の `PATH` が解決した先がそのまま `settings.json` に焼かれ、以後そこが毎分実行される。明示的に固定できる:
 
 ```bash
-claude-statusline --install --python /opt/homebrew/bin/python3
+npx @chieeeeno/claude-statusline --install --python /opt/homebrew/bin/python3
 ```
 
 指定したパスは書き込む前に検査する。実際に実行できること、そして Python 3.8 以上を名乗ることを確かめる。

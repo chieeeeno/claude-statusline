@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -29,12 +30,19 @@ interface Settings {
 type TargetId = "claude" | "antigravity";
 type TargetSelection = TargetId | "all";
 type InstallStatus = "installed" | "not installed" | "other";
+type OwnStatusLineKind = "copied" | "legacy";
+
+interface TargetInspection {
+  status: InstallStatus;
+  kind: OwnStatusLineKind | null;
+}
 
 interface TargetSpec {
   id: TargetId;
   label: string;
   displayPath: string;
   settingsPath: () => string;
+  installDir: () => string;
   buildStatusLine: (command: string) => StatusLineConfig;
 }
 
@@ -47,6 +55,12 @@ interface ParsedArgs {
 
 const PKG_ROOT = path.resolve(__dirname, "..");
 const SCRIPT = path.join(PKG_ROOT, "statusline.py");
+const INSTALLED_DIR_NAME = "claude-statusline";
+const INSTALLED_SCRIPT_NAME = "statusline.py";
+const INSTALLED_VERSION_NAME = "version";
+// 旧グローバルインストール（v2.1.0 以前）で settings.json に書かれたパッケージ直指しの
+// コマンドを認識するためのパターン。npx 経由で移行・アンインストールする際に使う。
+const LEGACY_PACKAGE_SCRIPT_RE = /\/@chieeeeno\/claude-statusline\/statusline\.py(?:'|$|\s)/;
 const MIN_PYTHON = { major: 3, minor: 8 } as const;
 
 const TARGETS: Record<TargetId, TargetSpec> = {
@@ -55,6 +69,7 @@ const TARGETS: Record<TargetId, TargetSpec> = {
     label: "Claude Code",
     displayPath: "~/.claude/settings.json",
     settingsPath: () => path.join(os.homedir(), ".claude", "settings.json"),
+    installDir: () => path.join(os.homedir(), ".claude", INSTALLED_DIR_NAME),
     buildStatusLine: (command: string): StatusLineConfig => ({
       type: "command",
       command,
@@ -66,6 +81,7 @@ const TARGETS: Record<TargetId, TargetSpec> = {
     label: "Antigravity CLI",
     displayPath: "~/.gemini/antigravity-cli/settings.json",
     settingsPath: () => path.join(os.homedir(), ".gemini", "antigravity-cli", "settings.json"),
+    installDir: () => path.join(os.homedir(), ".gemini", "antigravity-cli", INSTALLED_DIR_NAME),
     buildStatusLine: (command: string): StatusLineConfig => ({
       type: "command",
       command,
@@ -75,6 +91,14 @@ const TARGETS: Record<TargetId, TargetSpec> = {
     }),
   },
 };
+
+function targetScriptPath(target: TargetSpec): string {
+  return path.join(target.installDir(), INSTALLED_SCRIPT_NAME);
+}
+
+function targetVersionPath(target: TargetSpec): string {
+  return path.join(target.installDir(), INSTALLED_VERSION_NAME);
+}
 
 const VALID_TARGETS: ReadonlySet<string> = new Set(["claude", "antigravity", "all"]);
 
@@ -197,53 +221,104 @@ function requirePython(explicit: string | null): string {
 }
 
 /**
- * settings.json 内の statusLine が自パッケージを指しているか判定する。
+ * settings.json 内の statusLine が自ツールのコピー先か旧パッケージ直指しかを判定する。
  *
  * 引用ありの新形式と、引用なしで書かれた旧バージョンの設定の両方を認識する。
  * パスに ' を含む場合は引用時にエスケープされ、生のパスでは一致しないため。
  */
-function isOwnStatusLine(statusLine: unknown): boolean {
+function classifyOwnStatusLine(statusLine: unknown, target: TargetSpec): OwnStatusLineKind | null {
   if (statusLine === null || typeof statusLine !== "object" || Array.isArray(statusLine)) {
-    return false;
+    return null;
   }
   const current = String((statusLine as { command?: unknown }).command || "");
-  return current.includes(SCRIPT) || current.includes(shellQuote(SCRIPT));
+  const installedScript = targetScriptPath(target);
+  if (current.includes(installedScript) || current.includes(shellQuote(installedScript))) {
+    return "copied";
+  }
+  if (
+    current.includes(SCRIPT) ||
+    current.includes(shellQuote(SCRIPT)) ||
+    LEGACY_PACKAGE_SCRIPT_RE.test(current)
+  ) {
+    return "legacy";
+  }
+  return null;
+}
+
+function isOwnStatusLine(statusLine: unknown, target: TargetSpec): boolean {
+  return classifyOwnStatusLine(statusLine, target) !== null;
+}
+
+/** ターゲット配下に記録されたインストール済みバージョンを読む。読めなければ null。 */
+function readInstalledVersion(target: TargetSpec): string | null {
+  const dir = target.installDir();
+  let dirStat: fs.Stats;
+  try {
+    dirStat = fs.lstatSync(dir);
+  } catch {
+    return null;
+  }
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) return null;
+
+  const versionFile = targetVersionPath(target);
+  let fileStat: fs.Stats;
+  try {
+    fileStat = fs.lstatSync(versionFile);
+  } catch {
+    return null;
+  }
+  if (fileStat.isSymbolicLink() || !fileStat.isFile()) return null;
+
+  try {
+    const raw = fs.readFileSync(versionFile, "utf8");
+    const firstLine = (raw.split(/\r?\n/, 1)[0] ?? "").trim();
+    return firstLine || null;
+  } catch {
+    return null;
+  }
+}
+
+/** 選択メニュー・バージョン表示用に対象の導入状態と方式を調べる（ファイル破損で終了しない）。 */
+function inspectTargetDetail(target: TargetSpec): TargetInspection {
+  const settingsFile = target.settingsPath();
+  if (!fs.existsSync(settingsFile)) return { status: "not installed", kind: null };
+  let parsed: unknown;
+  try {
+    const raw = fs.readFileSync(settingsFile, "utf8");
+    if (!raw.trim()) return { status: "not installed", kind: null };
+    parsed = JSON.parse(raw);
+  } catch {
+    return { status: "not installed", kind: null };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { status: "not installed", kind: null };
+  }
+  const statusLine = (parsed as Settings).statusLine;
+  if (statusLine === undefined) return { status: "not installed", kind: null };
+  const kind = classifyOwnStatusLine(statusLine, target);
+  return kind ? { status: "installed", kind } : { status: "other", kind: null };
 }
 
 /** 選択メニュー表示用に対象の現在の導入状態を調べる（ファイル破損で終了しない）。 */
 function inspectTargetStatus(target: TargetSpec): InstallStatus {
-  const settingsFile = target.settingsPath();
-  if (!fs.existsSync(settingsFile)) return "not installed";
-  let parsed: unknown;
-  try {
-    const raw = fs.readFileSync(settingsFile, "utf8");
-    if (!raw.trim()) return "not installed";
-    parsed = JSON.parse(raw);
-  } catch {
-    return "not installed";
-  }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return "not installed";
-  }
-  const statusLine = (parsed as Settings).statusLine;
-  if (statusLine === undefined) return "not installed";
-  return isOwnStatusLine(statusLine) ? "installed" : "other";
+  return inspectTargetDetail(target).status;
 }
 
-function statusBadge(status: InstallStatus): string {
-  if (status === "installed") return "[installed]";
+function statusBadge(status: InstallStatus, version?: string | null): string {
+  if (status === "installed") return version ? `[installed v${version}]` : "[installed]";
   if (status === "other") return "[other tool configured]";
   return "[not installed]";
 }
 
 function formatTargetMenu(
   action: "install" | "uninstall",
-  statuses: Record<TargetId, InstallStatus>
+  statuses: Record<TargetId, InstallStatus>,
+  versions?: Partial<Record<TargetId, string | null>>
 ): string {
   const lines = [
     `Select target to ${action} statusLine:`,
-    `  1) ${TARGETS.claude.label} (${TARGETS.claude.displayPath}) ${statusBadge(statuses.claude)}`,
-    `  2) ${TARGETS.antigravity.label} (${TARGETS.antigravity.displayPath}) ${statusBadge(statuses.antigravity)}`,
+    `  1) ${TARGETS.claude.label} (${TARGETS.claude.displayPath}) ${statusBadge(statuses.claude, versions?.claude)}`,
+    `  2) ${TARGETS.antigravity.label} (${TARGETS.antigravity.displayPath}) ${statusBadge(statuses.antigravity, versions?.antigravity)}`,
     "  3) Both",
   ];
   return lines.join("\n");
@@ -260,11 +335,20 @@ function parseTargetChoice(input: string): TargetId[] | null {
 }
 
 async function promptTargetSelection(action: "install" | "uninstall"): Promise<TargetId[]> {
-  const statuses: Record<TargetId, InstallStatus> = {
-    claude: inspectTargetStatus(TARGETS.claude),
-    antigravity: inspectTargetStatus(TARGETS.antigravity),
+  const details: Record<TargetId, TargetInspection> = {
+    claude: inspectTargetDetail(TARGETS.claude),
+    antigravity: inspectTargetDetail(TARGETS.antigravity),
   };
-  console.log(formatTargetMenu(action, statuses));
+  const statuses: Record<TargetId, InstallStatus> = {
+    claude: details.claude.status,
+    antigravity: details.antigravity.status,
+  };
+  const versions: Record<TargetId, string | null> = {
+    claude: details.claude.kind === "copied" ? readInstalledVersion(TARGETS.claude) : null,
+    antigravity:
+      details.antigravity.kind === "copied" ? readInstalledVersion(TARGETS.antigravity) : null,
+  };
+  console.log(formatTargetMenu(action, statuses, versions));
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   let answer: string;
@@ -378,7 +462,154 @@ function writeSettings(settingsFile: string, settings: Settings): void {
   });
 }
 
-function installTarget(target: TargetSpec, settings: Settings, command: string): void {
+/**
+ * コピー先ディレクトリと配置対象パスが安全に書き込める状態か事前検証する。
+ *
+ * installDir がシンボリックリンクや通常ファイルになっていれば、リンク先への
+ * 誤書き込みを避けるため拒否する。配置先にディレクトリが居座る場合も rename が
+ * 失敗するため先に止める。
+ */
+function checkInstallTarget(target: TargetSpec): void {
+  const dir = target.installDir();
+  let dirStat: fs.Stats | null = null;
+  try {
+    dirStat = fs.lstatSync(dir);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  }
+  if (dirStat) {
+    if (dirStat.isSymbolicLink()) {
+      console.error(
+        `claude-statusline: ${dir} is a symbolic link; refusing to install into it.`
+      );
+      console.error("  Remove the symbolic link and try again.");
+      process.exit(1);
+    }
+    if (!dirStat.isDirectory()) {
+      console.error(`claude-statusline: ${dir} exists and is not a directory.`);
+      console.error("  Remove or move the file and try again.");
+      process.exit(1);
+    }
+  }
+
+  for (const dest of [targetScriptPath(target), targetVersionPath(target)]) {
+    let destStat: fs.Stats | null = null;
+    try {
+      destStat = fs.lstatSync(dest);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    }
+    if (destStat && destStat.isDirectory()) {
+      console.error(`claude-statusline: ${dest} is a directory; refusing to overwrite it.`);
+      console.error("  Remove or move the directory and try again.");
+      process.exit(1);
+    }
+  }
+}
+
+/**
+ * 同一ディレクトリ内の一時ファイル（O_EXCL）経由で原子的にファイルを置換する。
+ *
+ * statusline.py は高頻度で実行されるため、書き換え途中の部分読みを避ける。
+ * rename は対象がシンボリックリンクでも追従せずリンク自体を置き換えるため、
+ * 配置先シンボリックリンク経由の任意ファイル上書きも防げる。
+ */
+function writeFileAtomic(destPath: string, content: Buffer | string, mode: number): void {
+  const dir = path.dirname(destPath);
+  const base = path.basename(destPath);
+  const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const suffix = crypto.randomBytes(6).toString("hex");
+    const tmpPath = path.join(dir, `.${base}.tmp-${process.pid}-${suffix}`);
+    let fd: number;
+    try {
+      fd = fs.openSync(tmpPath, flags, mode);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "EEXIST") continue;
+      throw e;
+    }
+    try {
+      fs.writeFileSync(fd, content);
+    } catch (e) {
+      fs.closeSync(fd);
+      try {
+        fs.unlinkSync(tmpPath);
+      } catch {
+        // 清掃失敗は元の例外を隠さない
+      }
+      throw e;
+    }
+    fs.closeSync(fd);
+    try {
+      fs.renameSync(tmpPath, destPath);
+    } catch (e) {
+      try {
+        fs.unlinkSync(tmpPath);
+      } catch {
+        // 清掃失敗は元の例外を隠さない
+      }
+      throw e;
+    }
+    return;
+  }
+  console.error(`claude-statusline: could not create temporary file in ${dir}.`);
+  process.exit(1);
+}
+
+/** ターゲット配下に statusline.py と version ファイルを原子的に配置する。 */
+function installFiles(target: TargetSpec, scriptContent: Buffer, version: string): void {
+  const dir = target.installDir();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  writeFileAtomic(targetScriptPath(target), scriptContent, 0o700);
+  writeFileAtomic(targetVersionPath(target), `${version}\n`, 0o600);
+}
+
+/**
+ * ターゲット配下にコピーした既知ファイルだけを削除し、空ならディレクトリも消す。
+ *
+ * 利用者が独自に置いたファイルを誤って消さないよう rm -rf は使わない。
+ * installDir がシンボリックリンクの場合も追従せず手を付けない。
+ */
+function removeInstalledFiles(target: TargetSpec): boolean {
+  const dir = target.installDir();
+  let dirStat: fs.Stats;
+  try {
+    dirStat = fs.lstatSync(dir);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw e;
+  }
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) return false;
+
+  let removed = false;
+  for (const filePath of [targetScriptPath(target), targetVersionPath(target)]) {
+    let st: fs.Stats;
+    try {
+      st = fs.lstatSync(filePath);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw e;
+    }
+    if (st.isDirectory()) continue;
+    fs.unlinkSync(filePath);
+    removed = true;
+  }
+
+  try {
+    fs.rmdirSync(dir);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") throw e;
+  }
+  return removed;
+}
+
+function installTarget(
+  target: TargetSpec,
+  settings: Settings,
+  command: string,
+  version: string
+): void {
   const settingsFile = target.settingsPath();
   const backup = backupSettings(settingsFile);
 
@@ -388,6 +619,7 @@ function installTarget(target: TargetSpec, settings: Settings, command: string):
 
   if (backup) console.log(`Backed up existing settings to ${backup}`);
   console.log(`Installed status line (${target.label}) into ${settingsFile}`);
+  console.log(`  script:  ${targetScriptPath(target)} (v${version})`);
   console.log(`  command: ${entry.command}`);
 }
 
@@ -402,17 +634,23 @@ async function install({
 }): Promise<void> {
   const targetIds = await resolveTargets("install", explicitTarget);
   const python = requirePython(explicitPythonPath);
-  const command =
-    (runcat ? "CLAUDE_STATUSLINE_RUNCAT=1 " : "") + `${shellQuote(python)} ${shellQuote(SCRIPT)}`;
+  const scriptContent = fs.readFileSync(SCRIPT);
+  const version = packageVersion();
 
-  // 書き込み前に全対象の settings.json を読み込み検証し、片方が壊れているときの半適用を防ぐ
+  // 書き込み前に全対象の settings.json とコピー先を検証し、片方が壊れているときの半適用を防ぐ
   const prepared = targetIds.map((id) => {
     const target = TARGETS[id];
-    return { target, settings: readSettings(target.settingsPath()) };
+    const settings = readSettings(target.settingsPath());
+    checkInstallTarget(target);
+    return { target, settings };
   });
 
+  const runcatPrefix = runcat ? "CLAUDE_STATUSLINE_RUNCAT=1 " : "";
   for (const { target, settings } of prepared) {
-    installTarget(target, settings, command);
+    // settings.json より先にスクリプトを配置し、存在しないパスを指す瞬間を作らない
+    installFiles(target, scriptContent, version);
+    const command = `${runcatPrefix}${shellQuote(python)} ${shellQuote(targetScriptPath(target))}`;
+    installTarget(target, settings, command, version);
   }
   console.log("Changes take effect without a restart.");
 }
@@ -420,13 +658,18 @@ async function install({
 function uninstallTarget(target: TargetSpec, settings: Settings): boolean {
   const settingsFile = target.settingsPath();
   if (settings.statusLine === undefined) {
+    const cleaned = removeInstalledFiles(target);
+    if (cleaned) {
+      console.log(`Removed leftover status line files (${target.label}) from ${target.installDir()}`);
+      return true;
+    }
     console.log(
       `claude-statusline: nothing to uninstall for ${target.label} (no statusLine entry).`
     );
     return true;
   }
-  // 他のツールが設定した status line を消さない。
-  if (!isOwnStatusLine(settings.statusLine)) {
+  // 他のツールが設定した status line を消さない。コピー先ディレクトリにも触れない。
+  if (!isOwnStatusLine(settings.statusLine, target)) {
     const current =
       settings.statusLine !== null && typeof settings.statusLine === "object"
         ? String((settings.statusLine as { command?: unknown }).command || "")
@@ -440,8 +683,10 @@ function uninstallTarget(target: TargetSpec, settings: Settings): boolean {
   const backup = backupSettings(settingsFile);
   delete settings.statusLine;
   writeSettings(settingsFile, settings);
+  const removedFiles = removeInstalledFiles(target);
   if (backup) console.log(`Backed up existing settings to ${backup}`);
   console.log(`Removed status line (${target.label}) from ${settingsFile}`);
+  if (removedFiles) console.log(`Removed installed files from ${target.installDir()}`);
   return true;
 }
 
@@ -459,6 +704,21 @@ async function uninstall(explicitTarget: TargetSelection | null): Promise<void> 
   if (!ok) process.exit(1);
 }
 
+function printVersion(): void {
+  console.log(packageVersion());
+  for (const id of ["claude", "antigravity"] as const) {
+    const target = TARGETS[id];
+    const detail = inspectTargetDetail(target);
+    if (detail.status !== "installed") continue;
+    if (detail.kind === "legacy") {
+      console.log(`installed (${target.label}): legacy (package path)`);
+    } else {
+      const installed = readInstalledVersion(target);
+      console.log(`installed (${target.label}): ${installed ?? "unknown"}`);
+    }
+  }
+}
+
 function print(explicit: string | null): never {
   const python = requirePython(explicit);
   const result = spawnSync(python, [SCRIPT], { stdio: "inherit" });
@@ -468,10 +728,10 @@ function print(explicit: string | null): never {
 function usage(): void {
   console.log(`claude-statusline ${packageVersion()}
 
-  claude-statusline --install [--target <target>] [--runcat]  Write the statusLine entry into settings.json
-  claude-statusline --uninstall [--target <target>]           Remove the statusLine entry
+  claude-statusline --install [--target <target>] [--runcat]  Copy statusline.py and write statusLine into settings.json
+  claude-statusline --uninstall [--target <target>]           Remove the statusLine entry and copied files
   claude-statusline --print                                   Render a payload read from stdin (for debugging)
-  claude-statusline --version                                 Print the version
+  claude-statusline --version                                 Print CLI and installed versions
   claude-statusline --help                                    Show this message
 
   --target <claude|antigravity|all> selects the target CLI (prompts on a TTY; defaults to claude otherwise).
@@ -546,7 +806,7 @@ async function run(argv: string[]): Promise<void> {
     process.exit(1);
   }
 
-  if (has("--version")) console.log(packageVersion());
+  if (has("--version")) printVersion();
   else if (has("--install")) await install({ runcat: has("--runcat"), python, target });
   else if (has("--uninstall")) await uninstall(target);
   else if (has("--print")) print(python);
@@ -566,6 +826,8 @@ export {
   meetsMinimum,
   verifiedExecutable,
   resolvePython,
+  readInstalledVersion,
+  inspectTargetDetail,
   inspectTargetStatus,
   formatTargetMenu,
   parseTargetChoice,
