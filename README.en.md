@@ -95,7 +95,7 @@ for it.
 
 - macOS or Linux (Windows is not supported)
 - Python 3.8+ (uses the standard library only)
-- Node 18+ (setup only)
+- Node 24+ (setup only)
 - git (for the branch segment; everything else still renders without it)
 
 ## Development

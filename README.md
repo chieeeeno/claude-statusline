@@ -81,7 +81,7 @@ claude-statusline --install --python /opt/homebrew/bin/python3
 
 - macOS または Linux（Windows は非対応）
 - Python 3.8 以上（標準ライブラリのみを使う）
-- Node 18 以上（セットアップ時のみ）
+- Node 24 以上（セットアップ時のみ）
 - git（ブランチのセグメント用。無くても他は描画される）
 
 ## 開発
