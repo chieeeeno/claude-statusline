@@ -6,26 +6,47 @@
  * このパッケージは利用者の ~/.claude/settings.json を書き換えるため、
  * 全テストが mkdtemp で作った HOME の中だけで完結する。実 ~/.claude には触れない。
  *
- * package.json に "type": "module" がないので CommonJS で書く。
+ * Node 24 以降のネイティブ TypeScript 実行（型ストリッピング）と bun test の両方で
+ * そのまま動かせるよう、package.json に "type": "module" がない前提の CommonJS で書く。
  */
 
-const { test } = require("node:test");
-const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const os = require("node:os");
-const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+type TestContext = import("node:test").TestContext;
+type CliModule = typeof import("../src/claude-statusline");
+
+interface SettingsJson {
+  statusLine?: {
+    type: string;
+    command: string;
+    refreshInterval?: number;
+  };
+  permissions?: unknown;
+  env?: Record<string, string>;
+  [key: string]: unknown;
+}
+
+interface RunResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+const { test } = require("node:test") as typeof import("node:test");
+const assert: typeof import("node:assert/strict") = require("node:assert/strict");
+const fs = require("node:fs") as typeof import("node:fs");
+const os = require("node:os") as typeof import("node:os");
+const path = require("node:path") as typeof import("node:path");
+const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
 
 const ROOT = path.join(__dirname, "..");
 const BIN = path.join(ROOT, "bin", "claude-statusline.js");
 const SCRIPT = path.join(ROOT, "statusline.py");
-const PKG = require(path.join(ROOT, "package.json"));
+const PKG = require(path.join(ROOT, "package.json")) as { version: string };
 
-// 解決ロジックはサブプロセス越しには通せない分岐を持つため直接読み込む
-const cli = require(BIN);
+// 解決ロジックはサブプロセス越しには通せない分岐を持つため、ビルド成果物を直接読み込む
+const cli = require(BIN) as CliModule;
 
 /** 使い捨ての HOME を作り、テスト終了時に消す。 */
-function makeHome(t, settings) {
+function makeHome(t: TestContext, settings?: string): string {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "claude-statusline-test-"));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   if (settings !== undefined) {
@@ -35,15 +56,15 @@ function makeHome(t, settings) {
   return home;
 }
 
-function settingsPath(home) {
+function settingsPath(home: string): string {
   return path.join(home, ".claude", "settings.json");
 }
 
-function readSettings(home) {
-  return JSON.parse(fs.readFileSync(settingsPath(home), "utf8"));
+function readSettings(home: string): SettingsJson {
+  return JSON.parse(fs.readFileSync(settingsPath(home), "utf8")) as SettingsJson;
 }
 
-function run(args, home, input) {
+function run(args: string[], home: string, input?: string): RunResult {
   const r = spawnSync(process.execPath, [BIN, ...args], {
     env: { ...process.env, HOME: home },
     encoding: "utf8",
@@ -53,7 +74,7 @@ function run(args, home, input) {
 }
 
 /** 指定した 2 行を印字するだけの偽 python を作る。 */
-function makeStub(t, version, executable) {
+function makeStub(t: TestContext, version: string, executable: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-statusline-stub-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const stub = path.join(dir, "python3");
@@ -68,19 +89,19 @@ const REAL_PYTHON = spawnSync("python3", ["-c", "import sys; print(sys.executabl
 
 // --- --install ---------------------------------------------------------
 
-test("--install は statusLine を書き、無関係なキーを残す", (t) => {
+test("--install は statusLine を書き、無関係なキーを残す", (t: TestContext) => {
   const home = makeHome(t, JSON.stringify({ permissions: { allow: ["Bash"] }, env: { FOO: "1" } }));
   const r = run(["--install"], home);
   assert.equal(r.code, 0);
   const settings = readSettings(home);
   assert.deepEqual(settings.permissions, { allow: ["Bash"] });
   assert.deepEqual(settings.env, { FOO: "1" });
-  assert.equal(settings.statusLine.type, "command");
-  assert.equal(settings.statusLine.refreshInterval, 60);
-  assert.match(settings.statusLine.command, /statusline\.py/);
+  assert.equal(settings.statusLine?.type, "command");
+  assert.equal(settings.statusLine?.refreshInterval, 60);
+  assert.match(settings.statusLine?.command ?? "", /statusline\.py/);
 });
 
-test("--install は冪等", (t) => {
+test("--install は冪等", (t: TestContext) => {
   const home = makeHome(t);
   run(["--install"], home);
   const first = fs.readFileSync(settingsPath(home), "utf8");
@@ -88,34 +109,34 @@ test("--install は冪等", (t) => {
   assert.equal(fs.readFileSync(settingsPath(home), "utf8"), first);
 });
 
-test("--install はパスを引用符で包む", (t) => {
+test("--install はパスを引用符で包む", (t: TestContext) => {
   const home = makeHome(t);
   run(["--install"], home);
-  assert.match(readSettings(home).statusLine.command, /^'[^']+' '[^']+'$/);
+  assert.match(readSettings(home).statusLine?.command ?? "", /^'[^']+' '[^']+'$/);
 });
 
-test("--runcat は環境変数の前置きを足す", (t) => {
+test("--runcat は環境変数の前置きを足す", (t: TestContext) => {
   const home = makeHome(t);
   run(["--install", "--runcat"], home);
-  assert.match(readSettings(home).statusLine.command, /^CLAUDE_STATUSLINE_RUNCAT=1 '/);
+  assert.match(readSettings(home).statusLine?.command ?? "", /^CLAUDE_STATUSLINE_RUNCAT=1 '/);
 });
 
-test("--runcat なしでは環境変数を書かない", (t) => {
+test("--runcat なしでは環境変数を書かない", (t: TestContext) => {
   const home = makeHome(t);
   run(["--install"], home);
-  assert.doesNotMatch(readSettings(home).statusLine.command, /CLAUDE_STATUSLINE_RUNCAT/);
+  assert.doesNotMatch(readSettings(home).statusLine?.command ?? "", /CLAUDE_STATUSLINE_RUNCAT/);
 });
 
 // --- パーミッション ----------------------------------------------------
 
-test("新規の settings.json は 0600、.claude は 0700 で作る", (t) => {
+test("新規の settings.json は 0600、.claude は 0700 で作る", (t: TestContext) => {
   const home = makeHome(t);
   run(["--install"], home);
   assert.equal(fs.statSync(path.join(home, ".claude")).mode & 0o777, 0o700);
   assert.equal(fs.statSync(settingsPath(home)).mode & 0o777, 0o600);
 });
 
-test("既存 settings.json のモードは変えない", (t) => {
+test("既存 settings.json のモードは変えない", (t: TestContext) => {
   const home = makeHome(t, "{}");
   fs.chmodSync(settingsPath(home), 0o644);
   run(["--install"], home);
@@ -124,22 +145,27 @@ test("既存 settings.json のモードは変えない", (t) => {
 
 // --- バックアップ ------------------------------------------------------
 
-test("既存ファイルがあればタイムスタンプ付きで退避する", (t) => {
+test("既存ファイルがあればタイムスタンプ付きで退避する", (t: TestContext) => {
   const home = makeHome(t, '{"env":{"FOO":"1"}}');
   const r = run(["--install"], home);
   const backups = fs.readdirSync(path.join(home, ".claude")).filter((f) => f.includes(".bak-"));
   assert.equal(backups.length, 1);
   assert.match(r.stdout, /Backed up existing settings/);
   assert.deepEqual(
-    JSON.parse(fs.readFileSync(path.join(home, ".claude", backups[0]), "utf8")),
+    JSON.parse(fs.readFileSync(path.join(home, ".claude", backups[0]!), "utf8")),
     { env: { FOO: "1" } }
   );
 });
 
 // --- 壊れた settings.json ----------------------------------------------
 
-for (const [label, raw] of [["配列", "[1,2,3]"], ["null", "null"], ["文字列", '"hello"'], ["数値", "42"]]) {
-  test(`settings.json が ${label} なら exit 1 で止まる`, (t) => {
+for (const [label, raw] of [
+  ["配列", "[1,2,3]"],
+  ["null", "null"],
+  ["文字列", '"hello"'],
+  ["数値", "42"],
+] as const) {
+  test(`settings.json が ${label} なら exit 1 で止まる`, (t: TestContext) => {
     const home = makeHome(t, raw);
     const r = run(["--install"], home);
     assert.equal(r.code, 1);
@@ -150,7 +176,7 @@ for (const [label, raw] of [["配列", "[1,2,3]"], ["null", "null"], ["文字列
   });
 }
 
-test("settings.json が構文エラーなら上書きせず exit 1", (t) => {
+test("settings.json が構文エラーなら上書きせず exit 1", (t: TestContext) => {
   const home = makeHome(t, "{oops");
   const r = run(["--install"], home);
   assert.equal(r.code, 1);
@@ -158,7 +184,7 @@ test("settings.json が構文エラーなら上書きせず exit 1", (t) => {
   assert.equal(fs.readFileSync(settingsPath(home), "utf8"), "{oops");
 });
 
-test("空ファイルは新規扱いで通す", (t) => {
+test("空ファイルは新規扱いで通す", (t: TestContext) => {
   const home = makeHome(t, "  \n");
   assert.equal(run(["--install"], home).code, 0);
   assert.ok(readSettings(home).statusLine);
@@ -166,7 +192,7 @@ test("空ファイルは新規扱いで通す", (t) => {
 
 // --- --uninstall -------------------------------------------------------
 
-test("--uninstall は自分の statusLine だけ消す", (t) => {
+test("--uninstall は自分の statusLine だけ消す", (t: TestContext) => {
   const home = makeHome(t, JSON.stringify({ env: { FOO: "1" } }));
   run(["--install"], home);
   const r = run(["--uninstall"], home);
@@ -176,7 +202,7 @@ test("--uninstall は自分の statusLine だけ消す", (t) => {
   assert.deepEqual(settings.env, { FOO: "1" });
 });
 
-test("--uninstall は他ツールの statusLine を残す", (t) => {
+test("--uninstall は他ツールの statusLine を残す", (t: TestContext) => {
   const foreign = { type: "command", command: "/usr/local/bin/other-statusline" };
   const home = makeHome(t, JSON.stringify({ statusLine: foreign }));
   const r = run(["--uninstall"], home);
@@ -185,7 +211,7 @@ test("--uninstall は他ツールの statusLine を残す", (t) => {
   assert.deepEqual(readSettings(home).statusLine, foreign);
 });
 
-test("--uninstall は statusLine がなければ何もしない", (t) => {
+test("--uninstall は statusLine がなければ何もしない", (t: TestContext) => {
   const home = makeHome(t, "{}");
   const r = run(["--uninstall"], home);
   assert.equal(r.code, 0);
@@ -194,21 +220,21 @@ test("--uninstall は statusLine がなければ何もしない", (t) => {
 
 // --- フラグの扱い ------------------------------------------------------
 
-test("未知のフラグは exit 1", (t) => {
+test("未知のフラグは exit 1", (t: TestContext) => {
   const home = makeHome(t);
   const r = run(["--instal"], home);
   assert.equal(r.code, 1);
   assert.match(r.stderr, /unknown option: --instal/);
 });
 
-test("--version はパッケージのバージョンを出す", (t) => {
+test("--version はパッケージのバージョンを出す", (t: TestContext) => {
   const home = makeHome(t);
   const r = run(["--version"], home);
   assert.equal(r.code, 0);
   assert.equal(r.stdout.trim(), PKG.version);
 });
 
-test("引数なしでは使い方を出して settings.json を作らない", (t) => {
+test("引数なしでは使い方を出して settings.json を作らない", (t: TestContext) => {
   const home = makeHome(t);
   const r = run([], home);
   assert.equal(r.code, 0);
@@ -218,7 +244,7 @@ test("引数なしでは使い方を出して settings.json を作らない", (t
 
 // --- --print -----------------------------------------------------------
 
-test("--print は stdin のペイロードを描画する", (t) => {
+test("--print は stdin のペイロードを描画する", (t: TestContext) => {
   const home = makeHome(t);
   const r = run(["--print"], home, '{"model":{"display_name":"Opus 5"},"cwd":"/tmp/demo"}');
   assert.equal(r.code, 0);
@@ -227,38 +253,38 @@ test("--print は stdin のペイロードを描画する", (t) => {
 
 // --- --python ----------------------------------------------------------
 
-test("--python は指定したインタプリタを settings.json に焼く", (t) => {
+test("--python は指定したインタプリタを settings.json に焼く", (t: TestContext) => {
   const home = makeHome(t);
   const r = run(["--install", "--python", REAL_PYTHON], home);
   assert.equal(r.code, 0);
-  assert.equal(readSettings(home).statusLine.command, `'${REAL_PYTHON}' '${SCRIPT}'`);
+  assert.equal(readSettings(home).statusLine?.command, `'${REAL_PYTHON}' '${SCRIPT}'`);
 });
 
-test("--python=<path> の形式も受ける", (t) => {
+test("--python=<path> の形式も受ける", (t: TestContext) => {
   const home = makeHome(t);
   assert.equal(run(["--install", `--python=${REAL_PYTHON}`], home).code, 0);
-  assert.match(readSettings(home).statusLine.command, new RegExp(REAL_PYTHON));
+  assert.match(readSettings(home).statusLine?.command ?? "", new RegExp(REAL_PYTHON));
 });
 
-test("--python に値がなければ exit 1", (t) => {
+test("--python に値がなければ exit 1", (t: TestContext) => {
   const home = makeHome(t);
   const r = run(["--install", "--python"], home);
   assert.equal(r.code, 1);
   assert.match(r.stderr, /requires a path/);
 });
 
-test("--python の値が別のフラグなら exit 1", (t) => {
+test("--python の値が別のフラグなら exit 1", (t: TestContext) => {
   const home = makeHome(t);
   assert.equal(run(["--install", "--python", "--runcat"], home).code, 1);
 });
 
-test("--python の値は未知フラグ扱いしない", (t) => {
+test("--python の値は未知フラグ扱いしない", (t: TestContext) => {
   const home = makeHome(t);
   const r = run(["--install", "--python", REAL_PYTHON], home);
   assert.doesNotMatch(r.stderr, /unknown option/);
 });
 
-test("--python の指す先が実行できなければ exit 1", (t) => {
+test("--python の指す先が実行できなければ exit 1", (t: TestContext) => {
   const home = makeHome(t);
   const r = run(["--install", "--python", "/nope/python3"], home);
   assert.equal(r.code, 1);
@@ -266,7 +292,7 @@ test("--python の指す先が実行できなければ exit 1", (t) => {
   assert.equal(fs.existsSync(settingsPath(home)), false);
 });
 
-test("--python が版数を名乗れないなら exit 1", (t) => {
+test("--python が版数を名乗れないなら exit 1", (t: TestContext) => {
   const home = makeHome(t);
   const stub = makeStub(t, "not-a-version", "/bin/sh");
   const r = run(["--install", "--python", stub], home);
@@ -274,7 +300,7 @@ test("--python が版数を名乗れないなら exit 1", (t) => {
   assert.equal(fs.existsSync(settingsPath(home)), false);
 });
 
-test("--python が 3.8 未満なら exit 1", (t) => {
+test("--python が 3.8 未満なら exit 1", (t: TestContext) => {
   const home = makeHome(t);
   const stub = makeStub(t, "3.7", REAL_PYTHON);
   const r = run(["--install", "--python", stub], home);
@@ -282,12 +308,12 @@ test("--python が 3.8 未満なら exit 1", (t) => {
   assert.match(r.stderr, /3\.8 or newer is required/);
 });
 
-test("--python では被検査プログラムが名乗った実体パスを採用しない", (t) => {
+test("--python では被検査プログラムが名乗った実体パスを採用しない", (t: TestContext) => {
   // 2 行目に印字した任意の文字列がインタプリタとして焼かれる経路を塞ぐ
   const home = makeHome(t);
   const stub = makeStub(t, "3.12", "/bin/sh");
   run(["--install", "--python", stub], home);
-  const command = readSettings(home).statusLine.command;
+  const command = readSettings(home).statusLine?.command ?? "";
   assert.match(command, new RegExp(stub));
   assert.doesNotMatch(command, /\/bin\/sh/);
 });
@@ -296,7 +322,7 @@ test("--python では被検査プログラムが名乗った実体パスを採�
 // /usr/bin/python3 が在る環境では PATH 由来の候補まで到達しないため、
 // resolvePython() をそのまま呼んでもこの分岐は踏めない。部品を直に叩く。
 
-test("inspectPython は版数を解析できなければ null", (t) => {
+test("inspectPython は版数を解析できなければ null", (t: TestContext) => {
   assert.equal(cli.inspectPython(makeStub(t, "not-a-version", "/bin/sh")), null);
   assert.equal(cli.inspectPython(makeStub(t, "3", "/bin/sh")), null);
   assert.equal(cli.inspectPython(makeStub(t, "3.x", "/bin/sh")), null);
@@ -305,6 +331,7 @@ test("inspectPython は版数を解析できなければ null", (t) => {
 
 test("inspectPython は本物の python3 から版数と実体パスを取る", () => {
   const info = cli.inspectPython(REAL_PYTHON);
+  assert.ok(info !== null);
   assert.ok(Number.isInteger(info.major) && Number.isInteger(info.minor));
   assert.equal(info.executable, REAL_PYTHON);
 });
@@ -325,6 +352,7 @@ test("verifiedExecutable は名乗られたパスを検証する", () => {
   assert.equal(cli.verifiedExecutable({ major: 9, minor: 9, executable: REAL_PYTHON }), null);
 
   const info = cli.inspectPython(REAL_PYTHON);
+  assert.ok(info !== null);
   assert.equal(cli.verifiedExecutable(info), REAL_PYTHON);
 });
 

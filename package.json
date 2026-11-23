@@ -2,9 +2,13 @@
   "name": "@chieeeeno/claude-statusline",
   "version": "1.2.0",
   "description": "A fast, dependency-free status line for Claude Code. Shows context, rate limits, and cost. Renders in Python - no Node at render time.",
-  "bin": { "claude-statusline": "bin/claude-statusline.js" },
+  "bin": {
+    "claude-statusline": "bin/claude-statusline.js"
+  },
   "files": ["bin/", "statusline.py", "README.md", "LICENSE"],
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "os": ["darwin", "linux"],
   "license": "MIT",
   "repository": {
@@ -12,10 +16,19 @@
     "url": "git+https://github.com/chieeeeno/claude-statusline.git"
   },
   "keywords": ["claude", "claude-code", "statusline", "cli", "anthropic"],
-  "publishConfig": { "access": "public" },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "test": "npm run test:py && npm run test:js",
+    "build": "tsc -p tsconfig.build.json && chmod +x bin/claude-statusline.js",
+    "typecheck": "tsc --noEmit",
+    "prepack": "npm run build",
+    "test": "bun run test:py && bun run test:js",
     "test:py": "python3 tests/run_suite.py",
-    "test:js": "node tests/run_suite.js"
+    "test:js": "bun run build && node tests/run_suite.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "typescript": "^7.0.2"
   }
 }

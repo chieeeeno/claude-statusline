@@ -4,8 +4,8 @@ version: 2
 # 貼り替えられてもランナー上で他人のコードが走らない代わりに、更新が止まる。
 # SHA の追従はここに任せる。
 #
-# npm エコシステムは対象にしない。dependencies も devDependencies も空で、
-# テストは Node と Python の組み込み機能だけで回しているため。
+# dependencies は空だが、devDependencies（TypeScript・@types/node）の追従を
+# bun エコシステムで回す。
 updates:
   - package-ecosystem: github-actions
     directory: /
@@ -13,3 +13,9 @@ updates:
       interval: weekly
     commit-message:
       prefix: ci
+  - package-ecosystem: bun
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps

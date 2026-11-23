@@ -11,20 +11,20 @@
  * tests/ にテストを足しても走らず、落ちるテストを追加したのに CI が緑になる。
  */
 
-const fs = require("node:fs");
-const os = require("node:os");
-const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+const fs = require("node:fs") as typeof import("node:fs");
+const os = require("node:os") as typeof import("node:os");
+const path = require("node:path") as typeof import("node:path");
+const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
 
-const FILES = fs
+const FILES: string[] = fs
   .readdirSync(__dirname)
-  .filter((f) => f.endsWith(".test.js"))
+  .filter((f) => /\.test\.(ts|js)$/.test(f))
   .sort()
   .map((f) => path.join(__dirname, f));
 const MINIMUM = 30;
 
 if (FILES.length === 0) {
-  console.error("claude-statusline: no *.test.js files found in tests/");
+  console.error("claude-statusline: no *.test.ts / *.test.js files found in tests/");
   process.exit(1);
 }
 

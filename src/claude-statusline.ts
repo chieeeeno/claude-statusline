@@ -1,18 +1,41 @@
 #!/usr/bin/env node
-"use strict";
 
-const fs = require("node:fs");
-const os = require("node:os");
-const path = require("node:path");
-const { execFileSync, spawnSync } = require("node:child_process");
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
+
+interface PythonInfo {
+  major: number;
+  minor: number;
+  executable: string;
+}
+
+interface StatusLineConfig {
+  type: string;
+  command: string;
+  refreshInterval?: number;
+}
+
+interface Settings {
+  statusLine?: StatusLineConfig;
+  [key: string]: unknown;
+}
+
+interface ParsedArgs {
+  flags: Set<string>;
+  python: string | null;
+  unknown: string[];
+}
 
 const PKG_ROOT = path.resolve(__dirname, "..");
 const SCRIPT = path.join(PKG_ROOT, "statusline.py");
 const SETTINGS = path.join(os.homedir(), ".claude", "settings.json");
-const MIN_PYTHON = { major: 3, minor: 8 };
+const MIN_PYTHON = { major: 3, minor: 8 } as const;
 
-function packageVersion() {
-  return require(path.join(PKG_ROOT, "package.json")).version;
+function packageVersion(): string {
+  const pkg = require(path.join(PKG_ROOT, "package.json")) as { version: string };
+  return pkg.version;
 }
 
 /**
@@ -22,11 +45,8 @@ function packageVersion() {
  * 連結すると、空白を含む設置先（iCloud Drive や Google Drive の配下など）で
  * 描画が壊れ、シェルメタ文字を含むディレクトリ名では任意コマンドが毎分
  * 実行される。単一引用で包み、内部の ' は閉じて連結し直す。
- *
- * @param {string} s 引用する文字列
- * @returns {string} 単一引用で包まれた文字列
  */
-function shellQuote(s) {
+function shellQuote(s: string): string {
   return `'${String(s).replace(/'/g, "'\\''")}'`;
 }
 
@@ -36,12 +56,9 @@ function shellQuote(s) {
  * 版数が整数 2 つに解析できなければ null を返す。Number() は解析不能な出力に
  * NaN を返し、NaN はどの比較でも false になるため、素通しにすると最低版数の
  * 検査そのものが無効化される。
- *
- * @param {string} bin python の実行ファイル名またはパス
- * @returns {{major: number, minor: number, executable: string}|null} 実行できなければ null
  */
-function inspectPython(bin) {
-  let out;
+function inspectPython(bin: string): PythonInfo | null {
+  let out: string;
   try {
     out = execFileSync(
       bin,
@@ -53,16 +70,19 @@ function inspectPython(bin) {
   }
   const [version, executable] = out.trim().split("\n");
   const [major, minor] = String(version || "").split(".").map(Number);
-  if (!Number.isInteger(major) || !Number.isInteger(minor)) return null;
+  if (
+    major === undefined ||
+    minor === undefined ||
+    !Number.isInteger(major) ||
+    !Number.isInteger(minor)
+  ) {
+    return null;
+  }
   return { major, minor, executable: String(executable || "").trim() };
 }
 
-/**
- * 最低サポート版数を満たすか。
- * @param {{major: number, minor: number}|null} info inspectPython の戻り値
- * @returns {boolean}
- */
-function meetsMinimum(info) {
+/** 最低サポート版数を満たすか。 */
+function meetsMinimum(info: Pick<PythonInfo, "major" | "minor"> | null): boolean {
   if (!info) return false;
   if (info.major !== MIN_PYTHON.major) return info.major > MIN_PYTHON.major;
   return info.minor >= MIN_PYTHON.minor;
@@ -74,11 +94,8 @@ function meetsMinimum(info) {
  * この値は被検査プログラムが 2 行目に印字した文字列にすぎず、そのまま採用すると
  * 任意のパスが settings.json に焼かれて毎分実行される。絶対パスであることに加え、
  * そのパス自身を実行して同じ版数を名乗ることまで確かめる。
- *
- * @param {{major: number, minor: number, executable: string}} info inspectPython の戻り値
- * @returns {string|null} 検証を通った実体パス。通らなければ null
  */
-function verifiedExecutable(info) {
+function verifiedExecutable(info: PythonInfo): string | null {
   const exe = info.executable;
   if (!exe || !path.isAbsolute(exe)) return null;
   const confirmed = inspectPython(exe);
@@ -93,28 +110,23 @@ function verifiedExecutable(info) {
  * /usr/bin/python3 を最優先するのは、pyenv などのバージョン管理ツールの状態に
  * 左右されないため。pyenv の実体パスの方が起動は速いが、そのバージョンを削除
  * した時点で status line が動かなくなる。
- *
- * @returns {string|null} python のパス。見つからなければ null
  */
-function resolvePython() {
+function resolvePython(): string | null {
   for (const candidate of ["/usr/bin/python3", "python3"]) {
     const info = inspectPython(candidate);
     if (!meetsMinimum(info)) continue;
     // 絶対パスの候補は実行できた時点で確定。それ以外は PATH 由来なので、
     // shim の実体を返す sys.executable を検証したうえで採用する
     if (path.isAbsolute(candidate)) return candidate;
+    if (!info) continue;
     const executable = verifiedExecutable(info);
     if (executable) return executable;
   }
   return null;
 }
 
-/**
- * --python で明示指定されたインタプリタを検証する。
- * @param {string} value 利用者が渡したパス
- * @returns {string} 検証を通った絶対パス
- */
-function explicitPython(value) {
+/** --python で明示指定されたインタプリタを検証する。 */
+function explicitPython(value: string): string {
   const target = path.resolve(value);
   const info = inspectPython(target);
   if (!info) {
@@ -130,7 +142,7 @@ function explicitPython(value) {
   return target;
 }
 
-function requirePython(explicit) {
+function requirePython(explicit: string | null): string {
   if (explicit) return explicitPython(explicit);
   const python = resolvePython();
   if (python) return python;
@@ -139,15 +151,16 @@ function requirePython(explicit) {
   process.exit(1);
 }
 
-function readSettings() {
+function readSettings(): Settings {
   if (!fs.existsSync(SETTINGS)) return {};
   const raw = fs.readFileSync(SETTINGS, "utf8");
   if (!raw.trim()) return {};
-  let parsed;
+  let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    console.error(`claude-statusline: ${SETTINGS} is not valid JSON: ${e.message}`);
+    const message = e instanceof Error ? e.message : String(e);
+    console.error(`claude-statusline: ${SETTINGS} is not valid JSON: ${message}`);
     console.error("  Fix the file manually and try again.");
     process.exit(1);
   }
@@ -159,10 +172,10 @@ function readSettings() {
     console.error("  Fix the file manually and try again.");
     process.exit(1);
   }
-  return parsed;
+  return parsed as Settings;
 }
 
-function backupSettings() {
+function backupSettings(): string | null {
   if (!fs.existsSync(SETTINGS)) return null;
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const dest = `${SETTINGS}.bak-${stamp}`;
@@ -173,7 +186,7 @@ function backupSettings() {
 // settings.json には env.ANTHROPIC_API_KEY のような機微な設定が入りうる。
 // umask 任せだと共有ホストで他ローカルユーザーから読める 0644 で作られる。
 // mode は新規作成時にしか効かないため、既存ファイルのモードは変えない。
-function writeSettings(settings) {
+function writeSettings(settings: Settings): void {
   fs.mkdirSync(path.dirname(SETTINGS), { recursive: true, mode: 0o700 });
   fs.writeFileSync(SETTINGS, JSON.stringify(settings, null, 2) + "\n", {
     encoding: "utf8",
@@ -181,7 +194,7 @@ function writeSettings(settings) {
   });
 }
 
-function install({ runcat, python: explicit }) {
+function install({ runcat, python: explicit }: { runcat: boolean; python: string | null }): void {
   const python = requirePython(explicit);
   const settings = readSettings();
   const backup = backupSettings();
@@ -201,7 +214,7 @@ function install({ runcat, python: explicit }) {
   console.log("Claude Code picks this up without a restart.");
 }
 
-function uninstall() {
+function uninstall(): void {
   const settings = readSettings();
   if (!settings.statusLine) {
     console.log("claude-statusline: nothing to uninstall (no statusLine entry).");
@@ -223,13 +236,13 @@ function uninstall() {
   console.log(`Removed status line from ${SETTINGS}`);
 }
 
-function print(explicit) {
+function print(explicit: string | null): never {
   const python = requirePython(explicit);
   const result = spawnSync(python, [SCRIPT], { stdio: "inherit" });
   process.exit(result.status === null ? 1 : result.status);
 }
 
-function usage() {
+function usage(): void {
   console.log(`claude-statusline ${packageVersion()}
 
   claude-statusline --install [--runcat]  Write the statusLine entry into ~/.claude/settings.json
@@ -242,7 +255,7 @@ function usage() {
   --python <path> pins the interpreter instead of looking for /usr/bin/python3 or one on PATH.`);
 }
 
-const KNOWN_FLAGS = new Set([
+const KNOWN_FLAGS: ReadonlySet<string> = new Set([
   "--install",
   "--uninstall",
   "--print",
@@ -257,16 +270,14 @@ const PYTHON_FLAG = "--python";
  * コマンドラインを 1 パスで読む。
  *
  * --python の値をフラグ検査から除くために、includes() ではなく走査で解く。
- *
- * @param {string[]} argv process.argv.slice(2)
- * @returns {{flags: Set<string>, python: string|null, unknown: string[]}}
  */
-function parseArgs(argv) {
-  const flags = new Set();
-  const unknown = [];
-  let python = null;
+function parseArgs(argv: string[]): ParsedArgs {
+  const flags = new Set<string>();
+  const unknown: string[] = [];
+  let python: string | null = null;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
+    if (arg === undefined) continue;
     if (arg === PYTHON_FLAG || arg.startsWith(`${PYTHON_FLAG}=`)) {
       // 値を取り違えると、その文字列がインタプリタとして settings.json に焼かれる。
       // 空や別のフラグを黙って受けない
@@ -285,9 +296,9 @@ function parseArgs(argv) {
   return { flags, python, unknown };
 }
 
-function run(argv) {
+function run(argv: string[]): void {
   const { flags, python, unknown } = parseArgs(argv);
-  const has = (flag) => flags.has(flag);
+  const has = (flag: string): boolean => flags.has(flag);
 
   // 打ち間違えたフラグを usage + exit 0 で返すと、`cmd && next` で繋いだ
   // セットアップスクリプトが成功と判断して先へ進んでしまう。
@@ -304,7 +315,10 @@ function run(argv) {
   else usage();
 }
 
-if (require.main === module) run(process.argv.slice(2));
+if (require.main === module) {
+  run(process.argv.slice(2));
+}
+
 // インタプリタ解決はサブプロセス越しには通せない分岐を持つ（/usr/bin/python3 が
 // 在る環境では PATH 由来の候補に到達しない）。テストから直に呼べるようにしておく。
-else module.exports = { inspectPython, meetsMinimum, verifiedExecutable, resolvePython, parseArgs };
+export { inspectPython, meetsMinimum, verifiedExecutable, resolvePython, parseArgs };
