@@ -19,3 +19,8 @@ updates:
       interval: weekly
     commit-message:
       prefix: deps
+    ignore:
+      # engines.node が >=24 のため、@types/node は最小サポート版（24 系）を維持する
+      - dependency-name: "@types/node"
+        update-types:
+          - "version-update:semver-major"
