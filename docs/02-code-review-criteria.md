@@ -56,7 +56,7 @@ Claude Code は 300ms のデバウンスで status line を呼ぶ。実測の描
 
 ### 4.1 描画パスに Node を入れない
 
-Node コードを書いてよいのは `bin/claude-statusline.js` だけで、それはセットアップ時にしか走らない。`statusline.py` は単独で実行できなければならない。
+Node コードを書いてよいのは `src/claude-statusline.ts`（ビルド成果物は `bin/claude-statusline.js`）だけで、それはセットアップ時にしか走らない。`statusline.py` は単独で実行できなければならない。
 
 `settings.json` に書き込む `command` が `node` や `npx` を経由する形に変わっていたら Blocker。
 
@@ -113,11 +113,11 @@ status line が固まると Claude Code の画面が固まって見える。描�
 
 ### 4.10 パッケージ衛生
 
-- `files` に `tests/` `.github/` `docs/` `.claude/` を含めない。**`npm pack --dry-run` で確認する。** `files` フィールドの目視は確認したことにならない
+- `files` に `tests/` `.github/` `docs/` `.claude/` `src/` `tsconfig.json` `bun.lock` を含めない。**`npm pack --dry-run` で確認する。** `files` フィールドの目視は確認したことにならない
 - `publishConfig.access` は `"public"`。スコープ付きパッケージはこれがないと publish が権限エラーで落ちる
 - `os` は `["darwin", "linux"]`。Windows は意図的に非対応
 - `statusline.py` と `bin/claude-statusline.js` は実行可能（755）
-- `dependencies` と `devDependencies` を増やさない。テストは Python の `unittest` と Node の `node:test` だけで回している
+- `dependencies` を増やさない（実行時依存ゼロ）。`devDependencies` は TypeScript のビルド・型検査に必要な最小限（`typescript` と `@types/node`）に留め、テストフレームワーク等の依存を増やさない
 
 ### 4.11 表示文字列は必ず `sanitize` を通す
 
@@ -138,11 +138,11 @@ printf '{"workspace":{"current_dir":"/tmp/a\\u001b]52;c;cHdu\\u0007b"}}' \
 
 ### 4.12 テストの不在を成功にしない
 
-`unittest` も `node --test` も、テストを 1 件も収集できないまま exit 0 を返す（テストファイルを空にすると再現する）。`tests/run_suite.py` と `tests/run_suite.js` が件数の下限を見ているのはこのため。
+`unittest` も `node --test` も、テストを 1 件も収集できないまま exit 0 を返す（テストファイルを空にすると再現する）。`tests/run_suite.py` と `tests/run_suite.ts` が件数の下限を見ているのはこのため。
 
 **下限を下げる差分、およびこの包みを外して素の `unittest` / `node --test` に戻す差分は Blocker。** テストの削除が緑の CI として通る状態に戻る。
 
-包みは**追加方向にも効かなければならない。** モジュールやファイルを名指しで実行すると、`tests/` にテストを足してもそれが走らず、落ちるテストを追加したのに CI が緑になる。件数の下限は名指ししたファイルの中しか数えないため、ここでは捕まらない。`run_suite.py` は `discover`、`run_suite.js` は `*.test.js` の列挙を使う。**名指しに戻す差分は Blocker。**
+包みは**追加方向にも効かなければならない。** モジュールやファイルを名指しで実行すると、`tests/` にテストを足してもそれが走らず、落ちるテストを追加したのに CI が緑になる。件数の下限は名指ししたファイルの中しか数えないため、ここでは捕まらない。`run_suite.py` は `discover`、`run_suite.ts` は `*.test.ts` / `*.test.js` の列挙を使う。**名指しに戻す差分は Blocker。**
 
 検証は、必ず落ちるテストファイルを `tests/` に 1 本足して `npm test` を実行する。exit 0 なら違反。
 
@@ -171,7 +171,7 @@ status line のペイロードには `session_id`、`transcript_path`、`cwd` �
 
 ### 5.3 サプライチェーン（npm 公開物）
 
-- `postinstall` / `preinstall` などのライフサイクルスクリプトが**存在しないこと**。インストールしただけでコードが走る構造にしない
+- `postinstall` / `preinstall` / `prepare` のようなインストール時に走るライフサイクルスクリプトが**存在しないこと**。インストールしただけでコードが走る構造にしない（`prepack` は `npm pack` / `npm publish` 時のみ走るため許容）
 - `dependencies` が空であること。依存が増えた時点で、その依存の乗っ取りリスクを引き受けることになる
 - `files` が最小であること。意図しないファイルが公開物に入っていないか
 - パッケージ名が既存パッケージの typosquat と誤解される形になっていないか
@@ -191,15 +191,16 @@ status line のペイロードには `session_id`、`transcript_path`、`cwd` �
 
 | 確認対象 | 手段 | 期待 |
 | --- | --- | --- |
-| テストの成否 | `npm test` | 全件 OK。実際の件数を報告に書く |
-| 描画側だけ | `npm run test:py` | 全件 OK |
-| インストーラだけ | `npm run test:js` | 全件 OK |
-| テストが実在すること | テストファイルを空にして `npm test` | exit 1。exit 0 なら 4.12 違反 |
+| テストの成否 | `bun run test` | 全件 OK。実際の件数を報告に書く |
+| 型チェック | `bun run typecheck` | エラーなし |
+| 描画側だけ | `bun run test:py` | 全件 OK |
+| インストーラだけ | `bun run test:js` | 全件 OK |
+| テストが実在すること | テストファイルを空にして `bun run test` | exit 1。exit 0 なら 4.12 違反 |
 | Python 3.8 構文互換 | `/usr/bin/python3 -m py_compile statusline.py` | エラーなし |
 | 描画時間 | ペイロードを渡して 10 回実行し合計を測る | 0.6 秒未満（1 回あたり 60ms 未満） |
 | CLI の挙動 | `HOME=$(mktemp -d)` の隔離環境で再現する | 期待どおり。**実 `~/.claude` は触らない** |
-| 配布物の中身 | `npm pack --dry-run` | `tests/` `.github/` `docs/` `.claude/` が含まれない |
-| 依存の有無 | `package.json` の `dependencies` / `devDependencies` を確認 | 存在しない、または空 |
+| 配布物の中身 | `bun run prepack && npm pack --dry-run --ignore-scripts` | `bin/claude-statusline.js` が入り、`tests/` `.github/` `docs/` `.claude/` `src/` が含まれない |
+| 依存の有無 | `package.json` の `dependencies` / `devDependencies` を確認 | `dependencies` は存在しない、または空。`devDependencies` は `typescript` / `@types/node` のみ |
 
 描画時間の計測例:
 
@@ -215,8 +216,8 @@ time (for i in $(seq 10); do echo "$PAYLOAD" | /usr/bin/python3 statusline.py > 
 以下は毎回同じノイズになるため、指摘の対象外とする。
 
 - **スタイルの好み。** 行の折り返し位置、命名の趣味、関数の並び順
-- **テストフレームワークの変更提案。** `unittest` と `node:test` は依存ゼロを保つための意図的な選択。pytest や vitest を勧めない
-- **依存の追加提案。** 「このライブラリを使えば短く書ける」は、このパッケージでは改悪
+- **テストフレームワークの変更提案。** `unittest` と `node:test` はテスト用依存を増やさないための意図的な選択。pytest や vitest を勧めない
+- **実行時依存・不要な開発依存の追加提案。** 「このライブラリを使えば短く書ける」は、このパッケージでは改悪
 - **描画エンジンの別言語での書き直し。** Python であることが設計の中核
 - **日本語のコメントと docstring。** コード内のコメントは日本語が規約。英語にするのは stderr メッセージと CLI のヘルプのみ
 - **README が日本語であること。** `README.md`（日本語、GitHub と npm のトップに出る）と `README.en.md`（英語）の 2 本立てが規約。**ただし、片方だけを更新した差分は指摘する。** 内容の食い違いは実害になる

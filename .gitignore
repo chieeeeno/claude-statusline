@@ -1,4 +1,5 @@
 node_modules/
+bin/
 *.tgz
 __pycache__/
 *.pyc

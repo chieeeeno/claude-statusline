@@ -86,13 +86,19 @@ claude-statusline --install --python /opt/homebrew/bin/python3
 
 ## 開発
 
+開発には [Bun](https://bun.sh/) を使う。
+
 ```bash
-npm test         # 両方
-npm run test:py  # statusline.py を unittest で
-npm run test:js  # bin/claude-statusline.js を node:test で
+bun install        # devDependencies（typescript / @types/node）を入れる
+bun run typecheck  # 型チェック
+bun run build      # src/claude-statusline.ts → bin/claude-statusline.js
+bun run test       # 両方
+bun run test:py    # statusline.py を unittest で
+bun run test:js    # ビルド後に bin/claude-statusline.js を node:test で
+bun test           # ローカルで CLI テストだけを素早く回す（要ビルド）
 ```
 
-開発用の依存もゼロ。Python 側は `unittest`、CLI 側は Node 組み込みのテストランナーを使う。どちらの包みも、収集されたテストが想定件数を下回ったら失敗する。空のテストファイルも存在しないテストファイルもそれ自体は exit 0 で通ってしまい、テストを消したことが緑の CI になってしまうため。CLI のテストは毎回使い捨ての `HOME` の中で走るので、実際の `~/.claude` には触れない。
+実行時依存（`dependencies`）はゼロのまま維持している。開発用依存も TypeScript のビルド・型検査に必要な `typescript` と `@types/node` だけに留めており、Python 側は `unittest`、CLI 側は Node 組み込みの `node:test` を使う。どちらの包みも、収集されたテストが想定件数を下回ったら失敗する。空のテストファイルも存在しないテストファイルもそれ自体は exit 0 で通ってしまい、テストを消したことが緑の CI になってしまうため。CLI のテストは毎回使い捨ての `HOME` の中で走るので、実際の `~/.claude` には触れない。
 
 ## ライセンス
 

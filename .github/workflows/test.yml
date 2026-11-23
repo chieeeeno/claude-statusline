@@ -52,6 +52,18 @@ jobs:
           echo '{"model":{"display_name":"Opus 5"},"context_window":{"used_percentage":25,"total_input_tokens":50000,"context_window_size":200000}}' \
             | python3 statusline.py
 
+  # 型チェック。build でも tsc が走るが、単独のジョブとして分離しておくと
+  # 型エラーと実行時テスト失敗を CI の一覧で見分けられる。
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install dev dependencies
+        run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bun run typecheck
+
   # インストーラの検査。settings.json を書き換えるのはここだけで、Python 側の
   # ユニットテストはこの経路に一切触れない。パーミッションと homedir の扱いは
   # OS で差が出るため、描画側と同じく 2 つのランナーで回す。
@@ -68,10 +80,14 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
-      # run_suite.js は node --test を包んで件数の下限を見る。テストファイルを
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install dev dependencies and build
+        run: bun install --frozen-lockfile && bun run build
+      # run_suite.ts は node --test を包んで件数の下限を見る。テストファイルを
       # 空にすると node --test は exit 0 を返すため、素で呼ぶと緑になる。
+      # 実行ランタイム（Node）と検証ランタイムを一致させるため、CI は node で回す。
       - name: Run CLI tests
-        run: node tests/run_suite.js
+        run: node tests/run_suite.ts
 
   # 配布物の検査。チェックアウトに在るかではなく tarball に入ったかを見る。
   # files に "bin/" と書いた場合、ディレクトリが空でも存在検査は通ってしまい、
@@ -83,8 +99,11 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
-      # --ignore-scripts を付けて、PR が持ち込んだ prepack 等が
-      # ランナー上で走る経路を閉じる。同梱一覧の取得には影響しない。
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install dev dependencies and run prepack
+        run: bun install --frozen-lockfile && bun run prepack
+      # prepack は前段で検証済み。npm pack 側には --ignore-scripts を付けて
+      # スクリプト出力が --json に混入するのを防ぐ。
       - name: Collect what would be published
         run: npm pack --dry-run --ignore-scripts --json > /tmp/pack.json
       - name: Check the tarball contents and publish settings
@@ -104,8 +123,13 @@ jobs:
             if (absent.length) fail("missing from the tarball: " + absent.join(", "));
 
             const leaked = paths.filter((p) =>
-              /^(tests|\.github|docs|handover|\.claude)\//.test(p));
+              /^(tests|\.github|docs|handover|\.claude|src)\//.test(p) ||
+              /^(tsconfig(\..+)?\.json|bun\.lock)$/.test(p));
             if (leaked.length) fail("leaked into the tarball: " + leaked.join(", "));
+
+            // 実行時依存ゼロを維持する（devDependencies のみ許可）
+            if (pkg.dependencies && Object.keys(pkg.dependencies).length)
+              fail("dependencies must be empty");
 
             // スコープ付きパッケージはこれが無いと publish が権限エラーで落ちる
             if (pkg.publishConfig?.access !== "public") fail("publishConfig.access must be public");

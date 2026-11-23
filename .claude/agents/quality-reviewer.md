@@ -1,6 +1,6 @@
 ---
 name: quality-reviewer
-description: Reviews changes in the @chieeeeno/claude-statusline repository against the package's design invariants — no Node in the render path, Python standard library only, Python 3.8 compatibility, non-destructive settings.json handling, a frozen runcat-usage.json schema, and package hygiene. Reads docs/02-code-review-criteria.md and verifies its findings by running the tests and measuring render time rather than reasoning from the source alone. Invoke it after modifying statusline.py, tests/, bin/claude-statusline.js, package.json, or the CI workflow. Tell it which diff to review; it does not fix anything.
+description: Reviews changes in the @chieeeeno/claude-statusline repository against the package's design invariants — no Node in the render path, Python standard library only, Python 3.8 compatibility, non-destructive settings.json handling, a frozen runcat-usage.json schema, and package hygiene. Reads docs/02-code-review-criteria.md and verifies its findings by running the tests and measuring render time rather than reasoning from the source alone. Invoke it after modifying statusline.py, tests/, src/claude-statusline.ts, package.json, or the CI workflow. Tell it which diff to review; it does not fix anything.
 tools: Read, Grep, Glob, Bash
 model: inherit
 color: cyan
