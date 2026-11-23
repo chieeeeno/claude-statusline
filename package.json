@@ -28,7 +28,7 @@
     "test:js": "bun run build && node tests/run_suite.ts"
   },
   "devDependencies": {
-    "@types/node": "^24",
+    "@types/node": "^26",
     "typescript": "^7.0.2"
   }
 }
