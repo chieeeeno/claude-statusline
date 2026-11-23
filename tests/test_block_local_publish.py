@@ -99,6 +99,11 @@ class TestBlockLocalPublishLogic(unittest.TestCase):
             "2>&1 npm publish",
             "npm</dev/null publish",
             "npm publish 2>/dev/null",
+            "echo ok\n</dev/null npm publish",
+            "(</dev/null npm publish)",
+            "echo ok;>/dev/null npm publish",
+            "echo ok&&</dev/null npm publish",
+            "echo ok\n&>/dev/null npm publish",
             'sh <<< "npm publish"',
             "zsh <<< 'bun publish --ignore-scripts'",
         ]
@@ -161,6 +166,11 @@ class TestBlockLocalPublishLogic(unittest.TestCase):
             "bash -lc 'bun publish --dry-run'",
             "/bin/zsh -ec 'yarn npm publish'",
             'bash -o errexit -c "npm publish"',
+            "sh -euo pipefail -c 'npm publish'",
+            "bash -euo pipefail -c 'npm publish --ignore-scripts'",
+            "sh -eo errexit -c 'npm publish'",
+            "bash -oc pipefail 'npm publish'",
+            "bash -co 'npm publish' pipefail",
             'sh +e -c "npm publish"',
             'bash -c -- "npm publish"',
             'sh -c -- "npm publish"',
@@ -180,6 +190,11 @@ class TestBlockLocalPublishLogic(unittest.TestCase):
             'sh -c "npm publish" && cat <<EOF\ndon\'t\nEOF',
             "eval \"npm publish\"; cat <<EOF\n'\nEOF",
             "cat <<EOF\n$(npm publish)\nEOF",
+            "sh <<'EOF'\nnpm publish --ignore-scripts\nEOF",
+            "bash <<EOF\nnpm publish --ignore-scripts\nEOF",
+            "zsh <<-EOF\n\tbun publish --ignore-scripts\nEOF",
+            'echo "a\n<<\'EOF\' "\nnpm publish --ignore-scripts',
+            "echo 'a\n<<\\EOF '\nbun publish --ignore-scripts",
             'npm publish "unterminated',
             "echo ok && bun publish 'unterminated",
         ]
@@ -208,6 +223,7 @@ class TestBlockLocalPublishLogic(unittest.TestCase):
             "git tag -a v2.3.0 -m v2.3.0 && git push origin v2.3.0",
             "cat <<'EOF' > /tmp/statusline-release-pr.md\nローカルからの `npm publish` を禁止\nEOF",
             "cat <<EOF\ndon't run local publish\nEOF",
+            'echo "line1\n<<\'EOF\' in quoted string\nline3"',
         ]
         for cmd in commands:
             with self.subTest(cmd=cmd):

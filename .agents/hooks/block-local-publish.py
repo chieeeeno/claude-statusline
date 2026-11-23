@@ -26,7 +26,11 @@ INVALID_INPUT_REASON = (
 
 PACKAGE_MANAGERS = frozenset(("npm", "bun", "pnpm", "yarn"))
 SHELL_BINARIES = frozenset(("sh", "bash", "zsh", "dash", "ksh", "fish"))
-SEGMENT_SEP_CHARS = frozenset(";&|()\n")
+SEGMENT_SEP_TOKENS = frozenset((";", "&&", "||", "|", "|&", "&", "(", ")", "\n"))
+ALL_PUNCT_CHARS = frozenset(";&|()<>\n")
+PUNCT_SPLIT_RE = re.compile(
+    r"<<<|<<-|<<|&>>|&>|>>|>&|<&|>\||<>|\|\||&&|\|&|[;&|()<>\n]"
+)
 REDIR_CHARS = frozenset("<>")
 LEADING_KEYWORDS = frozenset(
     (
@@ -252,45 +256,81 @@ def _normalize_ansi_c_quotes(command):
     return "".join(out)
 
 
-def _parse_heredoc_specs(line):
-    """1 行の中からクォート外のヒアドキュメント指定 (<< / <<-) を抽出する。"""
+def _make_heredoc_sentinel(command, index):
+    """入力コマンド文字列と衝突しないヒアドキュメント参照トークンを生成する。"""
+    prefix = "__HD"
+    token = "{}_{}__".format(prefix, index)
+    while token in command:
+        prefix += "_"
+        token = "{}_{}__".format(prefix, index)
+    return token
+
+
+def _parse_heredoc_line(line, in_single, in_double, in_ansi_c, command, next_index):
+    """1 行のクォート状態を更新しながら、クォート外の << / <<- を抽出・置換する。
+
+    複数行にまたがるクォート状態を引き継ぐことで、クォート文字列内の <<'EOF' 等を
+    ヒアドキュメント開始と誤認するデグレを防ぐ。
+    """
     specs = []
+    out = []
     i = 0
     n = len(line)
-    in_single = False
-    in_double = False
 
     while i < n:
         ch = line[i]
         if in_single:
+            out.append(ch)
             if ch == "'":
                 in_single = False
             i += 1
             continue
-        if in_double:
+        if in_ansi_c:
             if ch == "\\" and i + 1 < n:
+                out.append(line[i:i + 2])
                 i += 2
                 continue
+            out.append(ch)
+            if ch == "'":
+                in_ansi_c = False
+            i += 1
+            continue
+        if in_double:
+            if ch == "\\" and i + 1 < n:
+                out.append(line[i:i + 2])
+                i += 2
+                continue
+            out.append(ch)
             if ch == '"':
                 in_double = False
             i += 1
             continue
         if ch == "\\" and i + 1 < n:
+            out.append(line[i:i + 2])
+            i += 2
+            continue
+        if ch == "$" and i + 1 < n and line[i + 1] == "'":
+            in_ansi_c = True
+            out.append("$'")
             i += 2
             continue
         if ch == "'":
             in_single = True
+            out.append(ch)
             i += 1
             continue
         if ch == '"':
             in_double = True
+            out.append(ch)
             i += 1
             continue
         if ch == "#" and (i == 0 or line[i - 1] in " \t;&|(){}"):
+            out.append(line[i:])
             break
         if ch == "<" and i + 1 < n and line[i + 1] == "<":
             # ヒアストリング (<<<) は対象外
             if i + 2 < n and line[i + 2] == "<":
+                out.append("<<<")
                 i += 3
                 continue
             j = i + 2
@@ -331,48 +371,66 @@ def _parse_heredoc_specs(line):
                     j += 1
             delim = "".join(delim_chars)
             if delim:
-                specs.append((delim, strip_tabs, quoted))
-            i = j
-            continue
+                sentinel = _make_heredoc_sentinel(command, next_index)
+                next_index += 1
+                specs.append((delim, strip_tabs, quoted, sentinel))
+                out.append("<< " + sentinel)
+                i = j
+                continue
+        out.append(ch)
         i += 1
-    return specs
+
+    return "".join(out), specs, in_single, in_double, in_ansi_c, next_index
 
 
 def _strip_heredocs(command):
-    """ヒアドキュメント本文をシェル構文から分離する。
+    """ヒアドキュメント本文をシェル構文から分離し、対応セグメントへ紐付けるマップを返す。
 
-    クォート付きヒアドキュメント (<<'EOF' 等) の本文は展開されないため除去し、
-    非クォート (<<EOF) の本文は $(...) / `...` 検査用に別途返す。
+    - クォート付き (<<'EOF' 等) の本文はシェル展開されないため置換スキャン対象外とし、
+      heredoc_map のみに格納する（SHELL_BINARIES の標準入力として渡される場合は検査する）。
+    - 非クォート (<<EOF) の本文は heredoc_map に加え、$(...) / `...` 検査用にも返す。
     """
     lines = command.splitlines(True)
     kept_lines = []
     unquoted_bodies = []
+    heredoc_map = {}
     pending = []
+    in_single = False
+    in_double = False
+    in_ansi_c = False
+    next_index = 0
 
     for line in lines:
         if pending:
-            delim, strip_tabs, quoted, buf = pending[0]
+            delim, strip_tabs, quoted, sentinel, buf = pending[0]
             cmp_line = line.rstrip("\r\n")
             if strip_tabs:
                 cmp_line = cmp_line.lstrip("\t")
             if cmp_line == delim:
-                if not quoted and buf:
-                    unquoted_bodies.append("".join(buf))
+                body = "".join(buf)
+                heredoc_map[sentinel] = body
+                if not quoted and body:
+                    unquoted_bodies.append(body)
                 pending.pop(0)
             else:
                 buf.append(line)
             continue
 
-        kept_lines.append(line)
-        for delim, strip_tabs, quoted in _parse_heredoc_specs(line):
-            pending.append((delim, strip_tabs, quoted, []))
+        rewritten, specs, in_single, in_double, in_ansi_c, next_index = _parse_heredoc_line(
+            line, in_single, in_double, in_ansi_c, command, next_index
+        )
+        kept_lines.append(rewritten)
+        for delim, strip_tabs, quoted, sentinel in specs:
+            pending.append((delim, strip_tabs, quoted, sentinel, []))
 
-    # 終端行がないまま入力が終わった場合も非クォート本文は検査対象に残す
-    for _, _, quoted, buf in pending:
-        if not quoted and buf:
-            unquoted_bodies.append("".join(buf))
+    # 終端行がないまま入力が終わった場合も回収した本文を保持する
+    for _, _, quoted, sentinel, buf in pending:
+        body = "".join(buf)
+        heredoc_map[sentinel] = body
+        if not quoted and body:
+            unquoted_bodies.append(body)
 
-    return "".join(kept_lines), unquoted_bodies
+    return "".join(kept_lines), unquoted_bodies, heredoc_map
 
 
 def _strip_shell_comments(command):
@@ -503,13 +561,8 @@ def _extract_substitutions(command):
     return results
 
 
-def _is_separator_token(tok):
-    """連続した区切り文字（\\n\\n, ;\\n, )\\n, &&( 等）も含めて区切りトークンか判定する。"""
-    return bool(tok) and all(ch in SEGMENT_SEP_CHARS for ch in tok)
-
-
 def _is_redirection_token(tok):
-    """リダイレクト演算子トークン（<, >, >>, >&, <& , <<< 等）か判定する。"""
+    """リダイレクト演算子トークン（<, >, >>, >&, <&, <<, <<< 等）か判定する。"""
     if not tok:
         return False
     if tok[0] in REDIR_CHARS and all(ch in "<>&|-" for ch in tok):
@@ -517,10 +570,10 @@ def _is_redirection_token(tok):
     return False
 
 
-def _strip_redirections(tokens):
-    """セグメントからシェルリダイレクトを除去し、(残余トークン, ヒアストリング一覧) を返す。"""
+def _strip_redirections(tokens, heredoc_map):
+    """セグメントからシェルリダイレクトを除去し、(残余トークン, 標準入力文字列一覧) を返す。"""
     cleaned = []
-    here_strings = []
+    here_inputs = []
     i = 0
     n = len(tokens)
     while i < n:
@@ -529,7 +582,13 @@ def _strip_redirections(tokens):
             if cleaned and cleaned[-1].isdigit():
                 cleaned.pop()
             if tok == "<<<" and i + 1 < n:
-                here_strings.append(tokens[i + 1])
+                here_inputs.append(tokens[i + 1])
+                i += 2
+                continue
+            if tok in ("<<", "<<-") and i + 1 < n:
+                body = heredoc_map.get(tokens[i + 1])
+                if body is not None:
+                    here_inputs.append(body)
                 i += 2
                 continue
             # リダイレクト対象トークンもスキップする
@@ -537,7 +596,7 @@ def _strip_redirections(tokens):
             continue
         cleaned.append(tok)
         i += 1
-    return cleaned, here_strings
+    return cleaned, here_inputs
 
 
 def _split_segments(command):
@@ -549,23 +608,26 @@ def _split_segments(command):
     lex.whitespace = " \t\r"
     # コメントは前処理で改行を残して除去済みのため shlex 側では無効化する
     lex.commenters = ""
-    tokens = list(lex)
+    raw_tokens = list(lex)
+
+    # 連続した記号トークン（\n<, (<, ;>, &&<, \n&>, \n\n 等）を個別のシェル演算子へ分解する
+    expanded = []
+    for tok in raw_tokens:
+        if tok and all(ch in ALL_PUNCT_CHARS for ch in tok):
+            expanded.extend(PUNCT_SPLIT_RE.findall(tok))
+        else:
+            expanded.append(tok)
 
     segments = []
     current = []
-    for tok in tokens:
-        if _is_separator_token(tok):
+    for tok in expanded:
+        if tok in SEGMENT_SEP_TOKENS:
             if current:
                 segments.append(current)
                 current = []
-        elif tok.startswith("&>") or tok.startswith("|&"):
-            if tok == "|&":
-                if current:
-                    segments.append(current)
-                    current = []
-            else:
-                # &> / &>> リダイレクトは次トークンとともに除去できるようリダイレクト扱いに変換
-                current.append(">" + tok[1:])
+        elif tok in ("&>", "&>>"):
+            # &> / &>> リダイレクトは次トークンとともに除去できるようリダイレクト扱いに変換
+            current.append(">" + tok[1:])
         else:
             current.append(tok)
     if current:
@@ -600,12 +662,12 @@ def _strip_package_version(token):
     return base.split("@", 1)[0]
 
 
-def _segment_is_publish(raw_tokens, depth):
+def _segment_is_publish(raw_tokens, depth, heredoc_map):
     """単一コマンドのトークン列がローカル publish を実行するか判定する。"""
     if depth > MAX_DEPTH:
         return True
 
-    tokens, here_strings = _strip_redirections(raw_tokens)
+    tokens, here_inputs = _strip_redirections(raw_tokens, heredoc_map)
     idx = 0
     n = len(tokens)
 
@@ -755,8 +817,8 @@ def _segment_is_publish(raw_tokens, depth):
             return is_local_publish_command(" ".join(rest_tokens), depth + 1)
 
         if cmd in SHELL_BINARIES:
-            for hs in here_strings:
-                if is_local_publish_command(hs, depth + 1):
+            for inp in here_inputs:
+                if is_local_publish_command(inp, depth + 1):
                     return True
             j = idx + 1
             while j < n:
@@ -766,13 +828,39 @@ def _segment_is_publish(raw_tokens, depth):
                 if arg in SHELL_VALUE_FLAGS:
                     j += 2
                     continue
-                if arg == "-c" or SHORT_C_FLAG_RE.match(arg):
-                    k = j + 1
-                    if k < n and tokens[k] == "--":
-                        k += 1
-                    if k < n and is_local_publish_command(tokens[k], depth + 1):
-                        return True
-                    break
+                if arg.startswith("--"):
+                    j += 1
+                    continue
+                if len(arg) >= 2 and arg[0] in ("-", "+") and arg[1:].isalpha():
+                    flags_part = arg[1:]
+                    has_o = "o" in flags_part
+                    has_c = (arg[0] == "-") and ("c" in flags_part)
+                    j += 1
+                    if has_o and has_c:
+                        o_pos = flags_part.index("o")
+                        c_pos = flags_part.index("c")
+                        if o_pos < c_pos:
+                            if j < n:
+                                j += 1
+                            if j < n and tokens[j] == "--":
+                                j += 1
+                            if j < n and is_local_publish_command(tokens[j], depth + 1):
+                                return True
+                        else:
+                            if j < n and is_local_publish_command(tokens[j], depth + 1):
+                                return True
+                        break
+                    if has_o:
+                        if j < n:
+                            j += 1
+                        continue
+                    if has_c:
+                        if j < n and tokens[j] == "--":
+                            j += 1
+                        if j < n and is_local_publish_command(tokens[j], depth + 1):
+                            return True
+                        break
+                    continue
                 if arg.startswith("-") or arg.startswith("+"):
                     j += 1
                     continue
@@ -794,7 +882,7 @@ def is_local_publish_command(command, depth=0):
     if depth > MAX_DEPTH:
         return True
 
-    stripped_cmd, unquoted_heredocs = _strip_heredocs(command)
+    stripped_cmd, unquoted_heredocs, heredoc_map = _strip_heredocs(command)
     normalized = _normalize_ansi_c_quotes(stripped_cmd)
     no_comments = _strip_shell_comments(normalized)
 
@@ -814,7 +902,7 @@ def is_local_publish_command(command, depth=0):
         return True
 
     for seg in segments:
-        if _segment_is_publish(seg, depth):
+        if _segment_is_publish(seg, depth, heredoc_map):
             return True
     return False
 
