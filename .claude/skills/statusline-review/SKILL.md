@@ -67,14 +67,27 @@ Run this at most **three times**. Track the round number; you will need it for e
 
 ### 4a. Dispatch both reviewers in parallel
 
-Send both Task calls **in a single message** so they run concurrently.
+Launch both reviewers **in a single message** so they run concurrently:
 
-- `quality-reviewer` — 品質観点（`docs/02` 第 4 章）
-- `security-reviewer` — セキュリティ観点（`docs/02` 第 5 章）
+- `quality-reviewer` — 品質観点（`docs/02` 第 4 章）、定義は `.claude/agents/quality-reviewer.md`
+- `security-reviewer` — セキュリティ観点（`docs/02` 第 5 章）、定義は `.claude/agents/security-reviewer.md`
+
+Runtime mapping:
+- **Claude Code**: dispatch both with `Task` using the registered agent names (`quality-reviewer`, `security-reviewer`).
+- **Google Antigravity CLI (`agy`)**: `.claude/agents/*.md` are not auto-loaded. Read both files, register them with `define_subagent` (using each file body as `SystemPrompt` and enabling read/command tools as needed, without write/edit instructions), and launch both in parallel with `invoke_subagent`.
 
 Give each the same input: the base ref, the head ref, and the list of changed files. Tell them the
 round number. Do not pass along your own opinion of the code — you wrote it, and seeding them with
 your reasoning defeats the point of reviewing in a separate context.
+
+**Re-review scope (Round 2+):**
+On Round 2 and later (re-reviews after fixes), pass the list of previous findings that were fixed
+along with the fix diff (`<prev-head>..HEAD`). Instruct both reviewers explicitly:
+- Focus strictly on verifying whether each reported finding has been properly fixed (and that the
+  fix itself does not break tests or introduce an obvious Blocker / Security High+ regression in
+  the modified lines).
+- **Do NOT re-audit unrelated code or search for new findings outside the reported items** in
+  principle. Broadening the scope on re-review causes the loop to drift instead of converging.
 
 **Put every instruction in the spawn prompt.** Messages sent to a reviewer after it starts are
 unreliable in this environment — an agent can go idle and stop acting on its inbox entirely. If
@@ -106,8 +119,7 @@ Read both report files:
 ls -l /tmp/statusline-review/r<周番号>-*.md
 ```
 
-**As soon as both reports are in hand, stop both agents** with `TaskStop`, passing each agent's
-name as `task_id`.
+**As soon as both reports are in hand, stop both agents** (`TaskStop` in Claude Code, or `manage_subagents` with `action: "kill"` in Antigravity).
 
 A reviewer that has delivered its report has nothing left to do, but it stays resident and keeps
 emitting idle notifications. Leaving them running across three rounds accumulates agents that all
@@ -160,8 +172,8 @@ worked examples, not text to copy.
 
 Count findings that are **Blocker** or **Security: High or above**.
 
-- **Zero** → post the LGTM summary from `docs/01` and stop. Done.
-- **Non-zero, and this was round 3** → post the 打ち切り summary. **Do not post LGTM.** Stop.
+- **Zero** → post the LGTM summary from `docs/01`, update the PR description with the final review summary (see 4g), and stop. Done.
+- **Non-zero, and this was round 3** → post the 打ち切り summary (**Do not post LGTM**), update the PR description with the final review summary (see 4g), and stop.
 - **Non-zero, rounds 1–2** → continue to 4e.
 
 ### 4e. Fix, then go around again
@@ -171,7 +183,7 @@ patches their own finding has ratified it without anyone checking.
 
 1. Fix only the Blocker and Security High+ findings. Leave everything else reported and untouched;
    widening the fix set is how this loop stops terminating
-2. `npm test`
+2. `bun run typecheck && bun run test`
 3. **If the tests fail, revert this round's fixes and stop.** Report what happened. Never push a
    broken tree
 4. Commit in Japanese, describing what was fixed and why
@@ -238,6 +250,24 @@ finding that is still live is worse than never reporting it. Findings you delibe
 unfixed — Should fix, Consider, Medium, Low — stay open. They are decisions to defer, not
 problems that went away.
 
+### 4g. Record the final review result in the PR description
+
+When the review loop finishes (either **LGTM** or **3 周で打ち切り**), update the PR description
+(`body`) itself so readers can see the outcome, findings, and LGTM status directly at the top of
+the PR without hunting through the timeline.
+
+1. Fetch the current PR body with `gh pr view <number> --json body -q .body`
+2. Append — or replace in place if already present — a section delimited by HTML comments:
+   `<!-- statusline-review:start -->` and `<!-- statusline-review:end -->`
+3. Follow the 「PR 本文のレビュー結果セクション」 template in `docs/01-review-skill-design.md`,
+   including:
+   - Final verdict (`✅ LGTM（第 N 周で完了）` or `⚠️ 3 周で打ち切り（未解決の指摘あり）`)
+   - Severity summary table (Blocker / Critical / High / Should fix / Medium / Consider / Low)
+   - All findings with severity, `file:line`, summary, and status (修正済み / 任意対応 / 未解決)
+   - Key measured verification results and the link to the posted PR review
+4. Apply with `gh pr edit <number> --body-file <file>` (never drop existing PR description content
+   outside the marker comments)
+
 ## Rules that hold throughout
 
 - **Never touch the real `~/.claude/settings.json`.** Every CLI check runs under `HOME=$(mktemp -d)`
@@ -246,6 +276,8 @@ problems that went away.
   whole loop worse than no review at all
 - **Never post LGTM while a Blocker or Security High+ remains**, whatever the round
 - **Do not widen the fix set** to Should fix / Medium / Consider. Those are reported, not fixed
+- **Keep re-reviews (Round 2+) scoped to the reported findings.** Verify the fixes thoroughly, and
+  do not expand into auditing unrelated areas in principle
 
 ## When you are done
 

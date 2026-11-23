@@ -2,7 +2,7 @@
 
 [日本語](README.md) | **English**
 
-A fast, dependency-free status line for [Claude Code](https://claude.com/claude-code).
+A fast, dependency-free status line for [Claude Code](https://claude.com/claude-code) and [Google Antigravity CLI (`agy`)](https://antigravity.google).
 
 ```
 📁 my-repo  ⧉ feature-branch
@@ -15,9 +15,10 @@ ctx ▓░░░░░░░░░ 10% 98k/1M │ 🔥 5h ▓▓▓▓▓▓▓�
 - **No Node at render time.** The status line is rendered by Python (~40ms). Node is used only
   to write the settings entry during setup. Node-based status lines pay 100ms+ of startup on
   every redraw, against a 300ms debounce window.
-- **Rate limit windows.** Shows your 5-hour and 7-day usage together with the time left until
-  each window resets and the local clock time it resets at (`↺2:03 (12:33)`) — so you can see
-  whether to keep going or wrap up. The date is added when the reset falls on another day.
+- **Rate limit & quota windows.** Shows your 5-hour and 7-day usage (including Antigravity CLI
+  `quota` buckets) together with the time left until each window resets and the local clock time
+  it resets at (`↺2:03 (12:33)`) — so you can see whether to keep going or wrap up. The date is
+  added when the reset falls on another day.
 - **Zero dependencies.** Python standard library only.
 
 ## Install
@@ -27,8 +28,29 @@ npm install -g @chieeeeno/claude-statusline
 claude-statusline --install
 ```
 
-That writes a `statusLine` entry into `~/.claude/settings.json` (backing up the existing file
-first). Claude Code picks it up without a restart.
+On an interactive terminal (TTY), `--install` displays the current status of each CLI and asks
+which target to configure:
+
+```
+Select target to install statusLine:
+  1) Claude Code (~/.claude/settings.json) [installed]
+  2) Antigravity CLI (~/.gemini/antigravity-cli/settings.json) [not installed]
+  3) Both
+Enter choice [1-3] (default: 1):
+```
+
+That writes a `statusLine` entry into the target `settings.json` (`~/.claude/settings.json` for
+Claude Code, `~/.gemini/antigravity-cli/settings.json` for Antigravity CLI), backing up the
+existing file first. Both pick it up without a restart.
+
+In non-interactive environments or scripts, pass `--target` explicitly (defaults to `claude` when
+omitted on a non-TTY for backward compatibility):
+
+```bash
+claude-statusline --install --target claude
+claude-statusline --install --target antigravity
+claude-statusline --install --target all
+```
 
 To update:
 
@@ -56,11 +78,14 @@ usage-based API plans.
 ## Commands
 
 ```
-claude-statusline --install [--runcat]  Write the statusLine entry into ~/.claude/settings.json
-claude-statusline --uninstall           Remove the statusLine entry
-claude-statusline --print               Render a payload read from stdin (for debugging)
-claude-statusline --version             Print the version
+claude-statusline --install [--target <target>] [--runcat]  Write the statusLine entry into settings.json
+claude-statusline --uninstall [--target <target>]           Remove the statusLine entry
+claude-statusline --print                                   Render a payload read from stdin (for debugging)
+claude-statusline --version                                 Print the version
 ```
+
+`--target` accepts `claude`, `antigravity`, or `all`. On a TTY, omitting it opens the interactive
+selector.
 
 Preview it without changing any settings:
 
@@ -86,10 +111,11 @@ The path is checked before it is written: it must run, and it must report Python
 
 ### RunCat Neo integration
 
-With `--install --runcat`, the status line also writes `~/.claude/runcat-usage.json` in the
-format [RunCat Neo](https://apps.apple.com/app/runcat) reads, so your model, context, and rate
-limit usage show up in the macOS menu bar. Off by default — nothing is written unless you ask
-for it.
+With `--install --runcat`, the status line also writes `runcat-usage.json` in the format
+[RunCat Neo](https://apps.apple.com/app/runcat) reads (`~/.claude/runcat-usage.json` for Claude
+Code, `~/.gemini/antigravity-cli/runcat-usage.json` for Antigravity CLI), so your model, context,
+and rate limit / quota usage show up in the macOS menu bar. Off by default — nothing is written
+unless you ask for it.
 
 ## Requirements
 

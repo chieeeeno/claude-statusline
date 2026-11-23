@@ -86,7 +86,25 @@ class TestFmtTokens(unittest.TestCase):
         self.assertEqual(sl.fmt_tokens(97531), "98k")
         self.assertEqual(sl.fmt_tokens(200000), "200k")
         self.assertEqual(sl.fmt_tokens(1000000), "1M")
+        self.assertEqual(sl.fmt_tokens(1048576), "1M")
         self.assertEqual(sl.fmt_tokens(1500000), "1.5M")
+
+
+class TestParseIsoTimestamp(unittest.TestCase):
+    def test_ISO8601のZ表記とオフセット表記を解析する(self):
+        self.assertEqual(sl.parse_iso_timestamp("2033-05-18T03:33:20Z"), 2000000000.0)
+        self.assertEqual(sl.parse_iso_timestamp("2033-05-18T12:33:20+09:00"), 2000000000.0)
+
+    def test_任意の小数秒桁数をPython38互換で解析する(self):
+        # Go の RFC3339Nano 等は 1〜9 桁の小数秒を出しうる
+        for frac in (".5", ".123", ".123456", ".123456789"):
+            ts = sl.parse_iso_timestamp(f"2033-05-18T03:33:20{frac}Z")
+            self.assertIsNotNone(ts, frac)
+            self.assertEqual(int(ts), 2000000000)
+
+    def test_不正な値はNoneを返す(self):
+        for bad in (None, "", "   ", "not-a-date", 2000000000, [1]):
+            self.assertIsNone(sl.parse_iso_timestamp(bad), repr(bad))
 
 
 class TestResetWindow(TZFixture, unittest.TestCase):
@@ -604,6 +622,181 @@ class TestMain(RuncatCase):
         out, err = run_main(raw, HOME=str(self.home), CLAUDE_STATUSLINE_RUNCAT="1")
         self.assertIn("some-repo", plain(out))
         self.assertIn("runcat-usage.json", err)
+
+
+def antigravity_payload(**over):
+    """Antigravity CLI 公式ドキュメント相当のペイロードを作る。"""
+    # 基準時刻 1999992620 (2033-05-18T01:30:20Z) に対して
+    # gemini-weekly は +432000 秒 = 2033-05-23T01:30:20Z (JST 5/23 10:30)
+    d = {
+        "cwd": "/Users/x/work/my-project",
+        "product": "antigravity",
+        "model": {
+            "id": "Gemini 4 Argon (Medium)",
+            "display_name": "Gemini 4 Argon (Medium)",
+            "effort": "medium",
+        },
+        "workspace": {
+            "current_dir": "/Users/x/work/my-project",
+            "project_dir": "/Users/x/work/my-project",
+        },
+        "context_window": {
+            "total_input_tokens": 88244,
+            "total_output_tokens": 61074,
+            "context_window_size": 1048576,
+            "used_percentage": 14.24,
+        },
+        "quota": {
+            "gemini-weekly": {
+                "remaining_fraction": 0.78,
+                "reset_time": "2033-05-23T01:30:20Z",
+                "reset_in_seconds": 432000,
+            }
+        },
+        "vcs": {"type": "git"},
+        "cycle_mode": "plan",
+        "cost": {"total_usd": 0.4213, "subagent_usd": 0, "estimated": False},
+    }
+    d.update(over)
+    return d
+
+
+class TestAntigravitySupport(TZFixture, RuncatCase):
+    NOW = 1999992620.0
+
+    def test_2行目にモデルeffortとcycle_modeを出す(self):
+        out = plain(sl.line_session(antigravity_payload(), "main"))
+        self.assertEqual(out, "⑂ main  🧠 Gemini 4 Argon (Medium)  ⚡ medium  ⚙ plan")
+
+    def test_2行目のAntigravity項目の制御文字を落とす(self):
+        d = antigravity_payload(
+            model={"display_name": "Gem\033ini", "effort": "hi\007gh"},
+            cycle_mode="pl\033[2Jan",
+        )
+        out = sl.line_session(d, "main")
+        self.assertNotIn("\033[2J", out)
+        self.assertNotIn("\007", out)
+        self.assertIn("🧠 Gemini", plain(out))
+        self.assertIn("⚡ high", plain(out))
+        self.assertIn("⚙ pl[2Jan", plain(out))
+
+    def test_3行目にコンテキストとクォータとtotal_usdを出す(self):
+        out = plain(sl.line_meters(antigravity_payload(), self.NOW))
+        self.assertEqual(
+            out,
+            "ctx ▓░░░░░░░░░ 14% 88k/1M │ 📅 7d ▓▓░░░░░░░░ 22% ↺5d (5/23 10:30) │ 💰 $0.42",
+        )
+
+    def test_5hとweeklyの両バケットを順序どおり描画する(self):
+        d = antigravity_payload(
+            quota={
+                "gemini-weekly": {
+                    "remaining_fraction": 0.78,
+                    "reset_time": "2033-05-23T01:30:20Z",
+                },
+                "gemini-5h": {
+                    "remaining_fraction": 0.33,
+                    "reset_time": "2033-05-18T03:33:20Z",
+                },
+            }
+        )
+        out = plain(sl.line_meters(d, self.NOW))
+        self.assertIn("🔥 5h ▓▓▓▓▓▓▓░░░ 67% ↺2:03 (12:33) │ 📅 7d ▓▓░░░░░░░░ 22% ↺5d (5/23 10:30)", out)
+
+    def test_複数モデル群のクォータはアクティブモデルに一致する枠を優先する(self):
+        d = antigravity_payload(
+            quota={
+                "gemini-weekly": {"remaining_fraction": 0.80, "reset_in_seconds": 432000},
+                "claude-weekly": {"remaining_fraction": 0.20, "reset_in_seconds": 432000},
+            }
+        )
+        out_gemini = plain(sl.line_meters(d, self.NOW))
+        self.assertIn("20%", out_gemini)
+        self.assertNotIn("80%", out_gemini)
+
+        d_claude = antigravity_payload(
+            model={"id": "Claude Opus 5", "display_name": "Claude Opus 5"},
+            quota=d["quota"],
+        )
+        out_claude = plain(sl.line_meters(d_claude, self.NOW))
+        self.assertIn("80%", out_claude)
+        self.assertNotIn("20%", out_claude)
+
+    def test_同名短縮ラベルが衝突する場合はバケットIDで区別しサニタイズする(self):
+        d = antigravity_payload(
+            model={"id": "Other", "display_name": "Other"},
+            quota={
+                "alpha-weekly": {"remaining_fraction": 0.9, "reset_in_seconds": 432000},
+                "beta\033[2J-weekly": {"remaining_fraction": 0.5, "reset_in_seconds": 432000},
+            },
+        )
+        raw_out = sl.line_meters(d, self.NOW)
+        self.assertNotIn("\033[2J", raw_out)
+        self.assertIn("alpha-weekly", plain(raw_out))
+        self.assertIn("beta[2J-weekly", plain(raw_out))
+
+    def test_無効や不正なクォータ枠を安全にスキップする(self):
+        d = antigravity_payload(
+            quota={
+                "disabled-5h": {"remaining_fraction": 0.5, "disabled": True},
+                "bool-5h": {"remaining_fraction": True},
+                "nan-5h": {"remaining_fraction": float("nan")},
+                "missing-5h": {"reset_in_seconds": 100},
+                "gemini-weekly": {"remaining_fraction": 0.75, "reset_in_seconds": 7380},
+            }
+        )
+        out = plain(sl.line_meters(d, self.NOW))
+        self.assertNotIn("disabled", out)
+        self.assertNotIn("bool", out)
+        self.assertIn("📅 7d ▓▓░░░░░░░░ 25% ↺2:03 (12:33)", out)
+
+    def test_total_input_tokensが無くてもused_tokensにフォールバックする(self):
+        d = antigravity_payload(
+            context_window={
+                "used_tokens": 50000,
+                "context_window_size": 200000,
+                "used_percentage": 25,
+            }
+        )
+        self.assertIn("50k/200k", plain(sl.line_meters(d, self.NOW)))
+
+    def test_RUNCAT書き出しはAntigravity専用パスとタイトルを使う(self):
+        sl.write_runcat(antigravity_payload())
+        agy_out = self.home / ".gemini" / "antigravity-cli" / "runcat-usage.json"
+        self.assertTrue(agy_out.is_file())
+        self.assertFalse(self.out.exists())
+        self.assertEqual((self.home / ".gemini").stat().st_mode & 0o777, 0o700)
+        self.assertEqual(agy_out.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(agy_out.stat().st_mode & 0o777, 0o600)
+        snap = json.loads(agy_out.read_text(encoding="utf-8"))
+        stamp = snap.pop("lastUpdatedDate")
+        self.assertRegex(stamp, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.assertEqual(
+            snap,
+            {
+                "title": "Antigravity",
+                "symbol": "staroflife",
+                "metrics": [
+                    {"title": "Model", "formattedValue": "Gemini 4 Argon (Medium)"},
+                    {"title": "Context", "formattedValue": "14.24%", "normalizedValue": 0.1424},
+                    {"title": "7d", "formattedValue": "22%", "normalizedValue": 0.22},
+                ],
+                "metricsBarValue": "14.24%",
+            },
+        )
+
+    def test_mainでAntigravityペイロードとvcs_branchを描画できる(self):
+        d = antigravity_payload(vcs={"type": "git", "branch": "feat/agy"})
+        out, err = run_main(json.dumps(d), HOME=str(self.home), CLAUDE_STATUSLINE_RUNCAT="1")
+        self.assertEqual(err, "")
+        lines = plain(out).strip().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(lines[0], "📁 my-project")
+        self.assertEqual(lines[1], "⑂ feat/agy  🧠 Gemini 4 Argon (Medium)  ⚡ medium  ⚙ plan")
+        self.assertIn("ctx ", lines[2])
+        self.assertIn("📅 7d", lines[2])
+        self.assertIn("💰 $0.42", lines[2])
+        self.assertTrue((self.home / ".gemini" / "antigravity-cli" / "runcat-usage.json").is_file())
 
 
 if __name__ == "__main__":
