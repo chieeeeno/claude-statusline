@@ -49,9 +49,13 @@ jobs:
 
   # npm への公開権限（id-token: write）を持つジョブ。
   # サードパーティ Action と依存インストールを実行せず、公式 actions/* のみで構成する。
+  # environment: npm を明示し、GitHub Settings 側で v* タグのみに制限したうえで
+  # npmjs.com の Trusted Publisher にも同一 Environment 名を登録することで、
+  # 保護外ブランチ上のワークフロー改変による OIDC トークン発行・公開を防ぐ。
   publish:
     needs: [verify, build]
     runs-on: ubuntu-latest
+    environment: npm
     permissions:
       id-token: write
       contents: read
