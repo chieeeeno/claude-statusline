@@ -45,10 +45,16 @@ invariant violation.
 
 1. Establish scope. The caller tells you which diff to review. If they did not, run
    `git diff main...HEAD --name-only` and audit that.
-2. Read every changed file **in full**. Trace where each externally-influenced value comes from
-   and where it ends up: the status line payload (`session_id`, `transcript_path`, `cwd`), the
-   repository name and branch name, environment variables, filesystem paths, the npm prefix.
-3. For each of the four areas in chapter 5, ask what an attacker who controls that input achieves.
+2. **Round 1 (initial audit)**: Read every changed file **in full**. Trace where each
+   externally-influenced value comes from and where it ends up: the status line payload
+   (`session_id`, `transcript_path`, `cwd`), the repository name and branch name, environment
+   variables, filesystem paths, the npm prefix. For each of the four areas in chapter 5, ask what an
+   attacker who controls that input achieves.
+3. **Round 2+ (re-review)**: When the caller provides the previous findings and fix diff, focus
+   strictly on verifying whether each reported finding has been properly mitigated (re-running the
+   reproduction steps against the fixed code). **Do not audit unrelated code or raise new findings
+   outside the reported items in principle** (except an obvious Security: High+ vulnerability
+   directly introduced by the fix itself).
 
 Values worth treating as hostile: the payload JSON on stdin, the current working directory and
 everything under it (including `.git/config`), branch and repository names, the resolved package

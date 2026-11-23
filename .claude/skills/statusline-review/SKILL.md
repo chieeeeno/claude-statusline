@@ -80,6 +80,15 @@ Give each the same input: the base ref, the head ref, and the list of changed fi
 round number. Do not pass along your own opinion of the code — you wrote it, and seeding them with
 your reasoning defeats the point of reviewing in a separate context.
 
+**Re-review scope (Round 2+):**
+On Round 2 and later (re-reviews after fixes), pass the list of previous findings that were fixed
+along with the fix diff (`<prev-head>..HEAD`). Instruct both reviewers explicitly:
+- Focus strictly on verifying whether each reported finding has been properly fixed (and that the
+  fix itself does not break tests or introduce an obvious Blocker / Security High+ regression in
+  the modified lines).
+- **Do NOT re-audit unrelated code or search for new findings outside the reported items** in
+  principle. Broadening the scope on re-review causes the loop to drift instead of converging.
+
 **Put every instruction in the spawn prompt.** Messages sent to a reviewer after it starts are
 unreliable in this environment — an agent can go idle and stop acting on its inbox entirely. If
 you find yourself needing to send a correction mid-run, stop the agent and spawn a fresh one with
@@ -267,6 +276,8 @@ the PR without hunting through the timeline.
   whole loop worse than no review at all
 - **Never post LGTM while a Blocker or Security High+ remains**, whatever the round
 - **Do not widen the fix set** to Should fix / Medium / Consider. Those are reported, not fixed
+- **Keep re-reviews (Round 2+) scoped to the reported findings.** Verify the fixes thoroughly, and
+  do not expand into auditing unrelated areas in principle
 
 ## When you are done
 

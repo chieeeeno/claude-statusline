@@ -37,9 +37,14 @@ genuinely alarming that chapter 5 would miss entirely, say so in one line at the
 
 1. Establish scope. The caller tells you which diff to review. If they did not, run
    `git diff main...HEAD --name-only` and review that.
-2. Read every changed file **in full**, not just the diff hunks. An invariant can break through
-   the interaction between changed and unchanged code, and a hunk alone will not show you that.
-3. Judge each change against chapter 4.
+2. **Round 1 (initial review)**: Read every changed file **in full**, not just the diff hunks. An
+   invariant can break through the interaction between changed and unchanged code, and a hunk alone
+   will not show you that. Judge each change against chapter 4.
+3. **Round 2+ (re-review)**: When the caller provides the previous findings and fix diff, focus
+   strictly on verifying whether each reported finding has been properly fixed (and that tests pass
+   without regressions in the fixed lines). **Do not check unrelated code or raise new findings
+   outside the reported items in principle** (except an obvious Blocker directly introduced by the
+   fix itself).
 
 ## Verify before you report
 
