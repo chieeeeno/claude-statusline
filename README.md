@@ -2,7 +2,7 @@
 
 **日本語** | [English](README.en.md)
 
-[Claude Code](https://claude.com/claude-code) 用の、速くて依存ゼロの status line。
+[Claude Code](https://claude.com/claude-code) / [Google Antigravity CLI (`agy`)](https://antigravity.google) 用の、速くて依存ゼロの status line。
 
 ```
 📁 my-repo  ⧉ feature-branch
@@ -12,8 +12,8 @@ ctx ▓░░░░░░░░░ 10% 98k/1M │ 🔥 5h ▓▓▓▓▓▓▓�
 
 ## なぜもう 1 つ status line を作ったのか
 
-- **描画時に Node を起動しない。** 描画は Python が担当する（約 40ms）。Node を使うのはセットアップ時に設定を書き込むときだけ。Node 製の status line は再描画のたびに 100ms 以上を起動に費やすが、Claude Code のデバウンスは 300ms しかない
-- **レート制限枠が見える。** 5 時間枠と 7 日枠の使用率を、リセットまでの残り時間とリセット時刻（`↺2:03 (12:33)`）と一緒に出す。作業を続けるか切り上げるかを判断できる。時刻はローカルタイムゾーンで、日をまたぐ場合は日付も付く
+- **描画時に Node を起動しない。** 描画は Python が担当する（約 40ms）。Node を使うのはセットアップ時に設定を書き込むときだけ。Node 製の status line は再描画のたびに 100ms 以上を起動に費やすが、Claude Code / Antigravity CLI のデバウンスは 300ms しかない
+- **レート制限枠・クォータが見える。** 5 時間枠と 7 日枠（Antigravity CLI の `quota` バケットを含む）の使用率を、リセットまでの残り時間とリセット時刻（`↺2:03 (12:33)`）と一緒に出す。作業を続けるか切り上げるかを判断できる。時刻はローカルタイムゾーンで、日をまたぐ場合は日付も付く
 - **依存ゼロ。** Python 標準ライブラリのみ
 
 ## インストール
@@ -23,7 +23,25 @@ npm install -g @chieeeeno/claude-statusline
 claude-statusline --install
 ```
 
-`~/.claude/settings.json` に `statusLine` の項目を書き込む（既存ファイルは事前に退避する）。Claude Code は再起動なしで反映する。
+対話端末（TTY）で `--install` を実行すると、各 CLI の導入状態を表示した選択メニューが出る:
+
+```
+Select target to install statusLine:
+  1) Claude Code (~/.claude/settings.json) [installed]
+  2) Antigravity CLI (~/.gemini/antigravity-cli/settings.json) [not installed]
+  3) Both
+Enter choice [1-3] (default: 1):
+```
+
+対象の `settings.json`（Claude Code は `~/.claude/settings.json`、Antigravity CLI は `~/.gemini/antigravity-cli/settings.json`）に `statusLine` の項目を書き込む（既存ファイルは事前に退避する）。どちらも再起動なしで反映する。
+
+非対話環境やスクリプトからは `--target` で明示できる（非 TTY で省略した場合は後方互換のため `claude` が選ばれる）:
+
+```bash
+claude-statusline --install --target claude
+claude-statusline --install --target antigravity
+claude-statusline --install --target all
+```
 
 更新:
 
@@ -48,11 +66,13 @@ npm update -g @chieeeeno/claude-statusline
 ## コマンド
 
 ```
-claude-statusline --install [--runcat]  ~/.claude/settings.json に statusLine を書き込む
-claude-statusline --uninstall           statusLine の項目を消す
-claude-statusline --print               stdin のペイロードを描画する（デバッグ用）
-claude-statusline --version             バージョンを出す
+claude-statusline --install [--target <target>] [--runcat]  settings.json に statusLine を書き込む
+claude-statusline --uninstall [--target <target>]           statusLine の項目を消す
+claude-statusline --print                                   stdin のペイロードを描画する（デバッグ用）
+claude-statusline --version                                 バージョンを出す
 ```
+
+`--target` には `claude`・`antigravity`・`all` を指定できる。TTY 上で省略すると対象選択メニューが出る。
 
 設定を変えずに見た目だけ確かめる:
 
@@ -75,7 +95,7 @@ claude-statusline --install --python /opt/homebrew/bin/python3
 
 ### RunCat Neo 連携
 
-`--install --runcat` を付けると、[RunCat Neo](https://apps.apple.com/app/runcat) が読む形式で `~/.claude/runcat-usage.json` も書き出す。モデル・コンテキスト・レート制限の使用率が macOS のメニューバーに出る。既定では無効で、明示的に有効にしない限り何も書かない。
+`--install --runcat` を付けると、[RunCat Neo](https://apps.apple.com/app/runcat) が読む形式で `runcat-usage.json` も書き出す（Claude Code は `~/.claude/runcat-usage.json`、Antigravity CLI は `~/.gemini/antigravity-cli/runcat-usage.json`）。モデル・コンテキスト・レート制限／クォータの使用率が macOS のメニューバーに出る。既定では無効で、明示的に有効にしない限り何も書かない。
 
 ## 動作要件
 

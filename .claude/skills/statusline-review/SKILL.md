@@ -67,10 +67,14 @@ Run this at most **three times**. Track the round number; you will need it for e
 
 ### 4a. Dispatch both reviewers in parallel
 
-Send both Task calls **in a single message** so they run concurrently.
+Launch both reviewers **in a single message** so they run concurrently:
 
-- `quality-reviewer` — 品質観点（`docs/02` 第 4 章）
-- `security-reviewer` — セキュリティ観点（`docs/02` 第 5 章）
+- `quality-reviewer` — 品質観点（`docs/02` 第 4 章）、定義は `.claude/agents/quality-reviewer.md`
+- `security-reviewer` — セキュリティ観点（`docs/02` 第 5 章）、定義は `.claude/agents/security-reviewer.md`
+
+Runtime mapping:
+- **Claude Code**: dispatch both with `Task` using the registered agent names (`quality-reviewer`, `security-reviewer`).
+- **Google Antigravity CLI (`agy`)**: `.claude/agents/*.md` are not auto-loaded. Read both files, register them with `define_subagent` (using each file body as `SystemPrompt` and enabling read/command tools as needed, without write/edit instructions), and launch both in parallel with `invoke_subagent`.
 
 Give each the same input: the base ref, the head ref, and the list of changed files. Tell them the
 round number. Do not pass along your own opinion of the code — you wrote it, and seeding them with
@@ -106,8 +110,7 @@ Read both report files:
 ls -l /tmp/statusline-review/r<周番号>-*.md
 ```
 
-**As soon as both reports are in hand, stop both agents** with `TaskStop`, passing each agent's
-name as `task_id`.
+**As soon as both reports are in hand, stop both agents** (`TaskStop` in Claude Code, or `manage_subagents` with `action: "kill"` in Antigravity).
 
 A reviewer that has delivered its report has nothing left to do, but it stays resident and keeps
 emitting idle notifications. Leaving them running across three rounds accumulates agents that all
@@ -171,7 +174,7 @@ patches their own finding has ratified it without anyone checking.
 
 1. Fix only the Blocker and Security High+ findings. Leave everything else reported and untouched;
    widening the fix set is how this loop stops terminating
-2. `npm test`
+2. `bun run typecheck && bun run test`
 3. **If the tests fail, revert this round's fixes and stop.** Report what happened. Never push a
    broken tree
 4. Commit in Japanese, describing what was fixed and why

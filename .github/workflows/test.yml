@@ -123,7 +123,7 @@ jobs:
             if (absent.length) fail("missing from the tarball: " + absent.join(", "));
 
             const leaked = paths.filter((p) =>
-              /^(tests|\.github|docs|handover|\.claude|src)\//.test(p) ||
+              /^(tests|\.github|docs|handover|\.claude|\.agents|src)\//.test(p) ||
               /^(tsconfig(\..+)?\.json|bun\.lock)$/.test(p));
             if (leaked.length) fail("leaked into the tarball: " + leaked.join(", "));
 

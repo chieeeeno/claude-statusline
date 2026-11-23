@@ -18,6 +18,9 @@ interface SettingsJson {
     type: string;
     command: string;
     refreshInterval?: number;
+    enabled?: boolean;
+    padding?: number;
+    stack_with_default?: boolean;
   };
   permissions?: unknown;
   env?: Record<string, string>;
@@ -60,8 +63,22 @@ function settingsPath(home: string): string {
   return path.join(home, ".claude", "settings.json");
 }
 
+function antigravitySettingsPath(home: string): string {
+  return path.join(home, ".gemini", "antigravity-cli", "settings.json");
+}
+
 function readSettings(home: string): SettingsJson {
   return JSON.parse(fs.readFileSync(settingsPath(home), "utf8")) as SettingsJson;
+}
+
+function readAntigravitySettings(home: string): SettingsJson {
+  return JSON.parse(fs.readFileSync(antigravitySettingsPath(home), "utf8")) as SettingsJson;
+}
+
+function writeAntigravitySettings(home: string, raw: string): void {
+  const file = antigravitySettingsPath(home);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, raw);
 }
 
 function run(args: string[], home: string, input?: string): RunResult {
@@ -360,11 +377,165 @@ test("parseArgs は --python の値をフラグから切り離す", () => {
   const parsed = cli.parseArgs(["--install", "--python", "/opt/python3", "--runcat"]);
   assert.deepEqual([...parsed.flags], ["--install", "--runcat"]);
   assert.equal(parsed.python, "/opt/python3");
+  assert.equal(parsed.target, null);
   assert.deepEqual(parsed.unknown, []);
 
-  const eq = cli.parseArgs(["--install", "--python=/opt/python3"]);
+  const eq = cli.parseArgs(["--install", "--python=/opt/python3", "--target=antigravity"]);
   assert.equal(eq.python, "/opt/python3");
+  assert.equal(eq.target, "antigravity");
   assert.deepEqual(eq.unknown, []);
 
+  const space = cli.parseArgs(["--install", "--target", "all"]);
+  assert.equal(space.target, "all");
+  assert.deepEqual(space.unknown, []);
+
   assert.deepEqual(cli.parseArgs(["--nope"]).unknown, ["--nope"]);
+});
+
+// --- --target / Antigravity CLI 対応 -----------------------------------
+
+test("--install --target antigravity は Antigravity 設定のみを書き 0700/0600 で作る", (t: TestContext) => {
+  const home = makeHome(t);
+  const r = run(["--install", "--target", "antigravity"], home);
+  assert.equal(r.code, 0);
+  assert.equal(fs.existsSync(settingsPath(home)), false);
+  const agyFile = antigravitySettingsPath(home);
+  assert.equal(fs.statSync(path.dirname(agyFile)).mode & 0o777, 0o700);
+  assert.equal(fs.statSync(agyFile).mode & 0o777, 0o600);
+  const settings = readAntigravitySettings(home);
+  assert.equal(settings.statusLine?.type, "command");
+  assert.equal(settings.statusLine?.enabled, true);
+  assert.equal(settings.statusLine?.padding, 0);
+  assert.equal(settings.statusLine?.stack_with_default, false);
+  assert.equal(settings.statusLine?.refreshInterval, undefined);
+  assert.match(settings.statusLine?.command ?? "", /^'[^']+' '[^']+'$/);
+});
+
+test("--install --target=antigravity は無関係なキーを残し退避する", (t: TestContext) => {
+  const home = makeHome(t);
+  writeAntigravitySettings(home, JSON.stringify({ model: "Gemini 4", permissions: { allow: [] } }));
+  const r = run(["--install", "--target=antigravity", "--runcat"], home);
+  assert.equal(r.code, 0);
+  const settings = readAntigravitySettings(home);
+  assert.equal(settings.model, "Gemini 4");
+  assert.deepEqual(settings.permissions, { allow: [] });
+  assert.match(settings.statusLine?.command ?? "", /^CLAUDE_STATUSLINE_RUNCAT=1 '/);
+  const backups = fs
+    .readdirSync(path.dirname(antigravitySettingsPath(home)))
+    .filter((f) => f.includes(".bak-"));
+  assert.equal(backups.length, 1);
+});
+
+test("--install --target all は Claude Code と Antigravity CLI の両方に書く", (t: TestContext) => {
+  const home = makeHome(t);
+  const r = run(["--install", "--target", "all"], home);
+  assert.equal(r.code, 0);
+  assert.equal(readSettings(home).statusLine?.refreshInterval, 60);
+  assert.equal(readAntigravitySettings(home).statusLine?.stack_with_default, false);
+});
+
+test("--uninstall --target antigravity は自分の statusLine だけ消す", (t: TestContext) => {
+  const home = makeHome(t);
+  writeAntigravitySettings(home, JSON.stringify({ model: "Gemini 4" }));
+  assert.equal(run(["--install", "--target", "antigravity"], home).code, 0);
+  const r = run(["--uninstall", "--target", "antigravity"], home);
+  assert.equal(r.code, 0);
+  const settings = readAntigravitySettings(home);
+  assert.equal(settings.statusLine, undefined);
+  assert.equal(settings.model, "Gemini 4");
+});
+
+test("--uninstall --target antigravity は他ツールや真偽値の statusLine を消さない", (t: TestContext) => {
+  const home = makeHome(t);
+  const foreign = { type: "command", command: "/usr/local/bin/other.sh" };
+  writeAntigravitySettings(home, JSON.stringify({ statusLine: foreign }));
+  const r1 = run(["--uninstall", "--target", "antigravity"], home);
+  assert.equal(r1.code, 1);
+  assert.match(r1.stderr, /different program/);
+  assert.deepEqual(readAntigravitySettings(home).statusLine, foreign);
+
+  writeAntigravitySettings(home, JSON.stringify({ statusLine: false }));
+  const r2 = run(["--uninstall", "--target", "antigravity"], home);
+  assert.equal(r2.code, 1);
+  assert.equal(readAntigravitySettings(home).statusLine, false);
+});
+
+test("--uninstall --target all は両方の statusLine を消す", (t: TestContext) => {
+  const home = makeHome(t);
+  assert.equal(run(["--install", "--target", "all"], home).code, 0);
+  const r = run(["--uninstall", "--target", "all"], home);
+  assert.equal(r.code, 0);
+  assert.equal(readSettings(home).statusLine, undefined);
+  assert.equal(readAntigravitySettings(home).statusLine, undefined);
+});
+
+test("--target の不正値や欠落は exit 1", (t: TestContext) => {
+  const home = makeHome(t);
+  for (const args of [
+    ["--install", "--target"],
+    ["--install", "--target", "--runcat"],
+    ["--install", "--target", "unknown"],
+    ["--install", "--target=unknown"],
+  ]) {
+    const r = run(args, home);
+    assert.equal(r.code, 1, args.join(" "));
+    assert.match(r.stderr, /--target must be one of/);
+  }
+});
+
+// --- 対象選択メニューと状態表示の単体テスト ----------------------------
+
+test("formatTargetMenu は各対象の導入状態を表示する", () => {
+  const menu = cli.formatTargetMenu("install", {
+    claude: "installed",
+    antigravity: "not installed",
+  });
+  assert.match(menu, /Select target to install statusLine:/);
+  assert.match(menu, /1\) Claude Code \(~\/\.claude\/settings\.json\) \[installed\]/);
+  assert.match(
+    menu,
+    /2\) Antigravity CLI \(~\/\.gemini\/antigravity-cli\/settings\.json\) \[not installed\]/
+  );
+  assert.match(menu, /3\) Both/);
+
+  const otherMenu = cli.formatTargetMenu("uninstall", {
+    claude: "other",
+    antigravity: "installed",
+  });
+  assert.match(otherMenu, /Select target to uninstall statusLine:/);
+  assert.match(otherMenu, /\[other tool configured\]/);
+});
+
+test("parseTargetChoice は番号・名前・空入力を解釈し不正値を拒否する", () => {
+  assert.deepEqual(cli.parseTargetChoice(""), ["claude"]);
+  assert.deepEqual(cli.parseTargetChoice("1"), ["claude"]);
+  assert.deepEqual(cli.parseTargetChoice("claude"), ["claude"]);
+  assert.deepEqual(cli.parseTargetChoice("2"), ["antigravity"]);
+  assert.deepEqual(cli.parseTargetChoice("Antigravity"), ["antigravity"]);
+  assert.deepEqual(cli.parseTargetChoice("3"), ["claude", "antigravity"]);
+  assert.deepEqual(cli.parseTargetChoice("both"), ["claude", "antigravity"]);
+  assert.deepEqual(cli.parseTargetChoice("all"), ["claude", "antigravity"]);
+  assert.equal(cli.parseTargetChoice("9"), null);
+  assert.equal(cli.parseTargetChoice("foo"), null);
+});
+
+test("inspectTargetStatus は未導入・導入済み・他ツール設定を判別する", (t: TestContext) => {
+  const home = makeHome(t);
+  const customTarget = {
+    ...cli.TARGETS.antigravity,
+    settingsPath: () => antigravitySettingsPath(home),
+  };
+  assert.equal(cli.inspectTargetStatus(customTarget), "not installed");
+
+  writeAntigravitySettings(home, "{broken");
+  assert.equal(cli.inspectTargetStatus(customTarget), "not installed");
+
+  writeAntigravitySettings(
+    home,
+    JSON.stringify({ statusLine: { type: "command", command: "/other/script.sh" } })
+  );
+  assert.equal(cli.inspectTargetStatus(customTarget), "other");
+
+  assert.equal(run(["--install", "--target", "antigravity"], home).code, 0);
+  assert.equal(cli.inspectTargetStatus(customTarget), "installed");
 });

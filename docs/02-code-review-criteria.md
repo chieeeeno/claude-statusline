@@ -16,7 +16,7 @@
 
 `@chieeeeno/claude-statusline` は Claude Code の status line を 3 行で描画する npm パッケージ。
 
-描画エンジンは `statusline.py`（Python、標準ライブラリのみ）。**npm はインストーラとしてのみ使う。** `bin/claude-statusline.js` が `~/.claude/settings.json` に「Python インタプリタの実体パス + パッケージ内 `statusline.py` の絶対パス」を直接書き込むため、**描画時に Node は起動しない**。
+描画エンジンは `statusline.py`（Python、標準ライブラリのみ）。**npm はインストーラとしてのみ使う。** `bin/claude-statusline.js` が `~/.claude/settings.json`（および Antigravity CLI の `~/.gemini/antigravity-cli/settings.json`）に「Python インタプリタの実体パス + パッケージ内 `statusline.py` の絶対パス」を直接書き込むため、**描画時に Node は起動しない**。
 
 Claude Code は 300ms のデバウンスで status line を呼ぶ。実測の描画時間は 46ms。競合パッケージはいずれも Node 製で毎描画 100ms 以上を消費しており、そこに勝つことがこのパッケージの存在理由そのものである。
 
@@ -113,7 +113,7 @@ status line が固まると Claude Code の画面が固まって見える。描�
 
 ### 4.10 パッケージ衛生
 
-- `files` に `tests/` `.github/` `docs/` `.claude/` `src/` `tsconfig.json` `bun.lock` を含めない。**`npm pack --dry-run` で確認する。** `files` フィールドの目視は確認したことにならない
+- `files` に `tests/` `.github/` `docs/` `.claude/` `.agents/` `src/` `tsconfig*.json` `bun.lock` を含めない。**`npm pack --dry-run` で確認する。** `files` フィールドの目視は確認したことにならない
 - `publishConfig.access` は `"public"`。スコープ付きパッケージはこれがないと publish が権限エラーで落ちる
 - `os` は `["darwin", "linux"]`。Windows は意図的に非対応
 - `statusline.py` と `bin/claude-statusline.js` は実行可能（755）

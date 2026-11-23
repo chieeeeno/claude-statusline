@@ -1,8 +1,8 @@
 #!/usr/bin/python3
-"""Claude Code status line。
+"""Claude Code / Google Antigravity CLI status line。
 
 stdin で受け取った status line ペイロード(JSON)から 3 行を組み立てて stdout に出力する。
-CLAUDE_STATUSLINE_RUNCAT が設定されている場合のみ ~/.claude/runcat-usage.json
+CLAUDE_STATUSLINE_RUNCAT が設定されている場合のみ runcat-usage.json
 (RunCat Neo 連携) を更新する。
 
 shebang を /usr/bin/python3 に固定しているのは、/usr/bin/env 経由だと PATH 上の
@@ -10,7 +10,9 @@ pyenv shim を掴んでしまい、1 描画あたり 60ms 以上を余計に消�
 """
 
 import json
+import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -26,6 +28,7 @@ BLUE = "\033[38;5;75m"
 
 BAR_WIDTH = 10
 SEP = f" {GRAY}│{RESET} "
+_ISO_FRAC = re.compile(r"(\.\d+)(?=[+-]\d{2}:\d{2}$|$)")
 
 
 def color_for(pct):
@@ -61,10 +64,135 @@ def fmt_tokens(n):
     @returns "999" / "98k" / "1M" / "1.5M" のいずれかの形式
     """
     if n >= 1_000_000:
-        return f"{n / 1_000_000:g}M"
+        return f"{round(n / 1_000_000, 1):g}M"
     if n >= 1000:
         return f"{round(n / 1000)}k"
     return str(n)
+
+
+def is_antigravity(d):
+    """Antigravity CLI 由来のペイロードかどうか。"""
+    return d.get("product") == "antigravity"
+
+
+def _is_finite_number(value):
+    """bool を除く有限数値かどうか。"""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def parse_iso_timestamp(value):
+    """ISO 8601 / RFC 3339 文字列を Unix 秒へ変換する（Python 3.8 互換）。
+
+    Python 3.8 の datetime.fromisoformat は末尾の 'Z' や 3/6 桁以外の小数秒
+    （Go の RFC3339Nano 等）を受け付けないため、ここで正規化してから解析する。
+
+    @param value ISO 8601 文字列
+    @returns Unix 秒（float）。解析できなければ None
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    s = value.strip()
+    if s.endswith("Z") or s.endswith("z"):
+        s = s[:-1] + "+00:00"
+    s = _ISO_FRAC.sub(lambda m: "." + (m.group(1)[1:] + "000000")[:6], s)
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    try:
+        return dt.timestamp()
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _quota_meta(bucket_id):
+    """クォータのバケット ID から表示順・絵文字・短縮ラベルを決める。"""
+    low = bucket_id.lower()
+    if "5h" in low or "five_hour" in low or "five-hour" in low or "hourly" in low:
+        return 0, "🔥", "5h"
+    if "daily" in low or "24h" in low or "1d" in low:
+        return 1, "📆", "1d"
+    if "weekly" in low or "7d" in low or "seven_day" in low or "seven-day" in low:
+        return 2, "📅", "7d"
+    return 3, "📊", truncate(sanitize(bucket_id), 16)
+
+
+def _select_quota_buckets(quota, model):
+    """複数モデル群のクォータがある場合、アクティブモデルに合う枠を優先抽出する。"""
+    items = [
+        (str(k), v)
+        for k, v in quota.items()
+        if isinstance(k, str) and isinstance(v, dict) and not v.get("disabled")
+    ]
+    if len(items) <= 1 or not isinstance(model, dict):
+        return items
+
+    model_text = (
+        str(model.get("id") or "") + " " + str(model.get("display_name") or "")
+    ).lower()
+    for token in ("gemini", "claude", "flash", "pro"):
+        if token in model_text:
+            matched = [item for item in items if token in item[0].lower()]
+            if matched and len(matched) < len(items):
+                items = matched
+    return items
+
+
+def quota_windows(d, now):
+    """レート制限・クォータ枠を共通形式 (emoji, label, used_pct, resets_at) で返す。
+
+    Claude Code の rate_limits と Antigravity CLI の quota を同じ描画・RunCat
+    経路へ正規化する。
+
+    @param d status line ペイロード
+    @param now 現在時刻（Unix 秒）
+    @returns (emoji, label, used_pct, resets_at) のリスト
+    """
+    windows = []
+    rate_limits = d.get("rate_limits")
+    if isinstance(rate_limits, dict):
+        for emoji, key, label in (("🔥", "five_hour", "5h"), ("📅", "seven_day", "7d")):
+            window = rate_limits.get(key)
+            if not isinstance(window, dict):
+                continue
+            pct = window.get("used_percentage")
+            if pct is not None:
+                windows.append((emoji, label, pct, window.get("resets_at")))
+        if windows:
+            return windows
+
+    quota = d.get("quota")
+    if not isinstance(quota, dict):
+        return windows
+
+    selected = _select_quota_buckets(quota, d.get("model"))
+    entries = []
+    for bucket_id, bucket in selected:
+        rem = bucket.get("remaining_fraction")
+        if not _is_finite_number(rem):
+            continue
+        used_pct = max(0.0, min(100.0, (1.0 - rem) * 100.0))
+        resets_at = parse_iso_timestamp(bucket.get("reset_time"))
+        if resets_at is None:
+            reset_in = bucket.get("reset_in_seconds")
+            if _is_finite_number(reset_in) and reset_in > 0:
+                resets_at = now + reset_in
+        order, emoji, label = _quota_meta(bucket_id)
+        entries.append((order, bucket_id, emoji, label, used_pct, resets_at))
+
+    label_counts = {}
+    for _, _, _, label, _, _ in entries:
+        label_counts[label] = label_counts.get(label, 0) + 1
+
+    entries.sort(key=lambda e: (e[0], e[1]))
+    for _, bucket_id, emoji, label, used_pct, resets_at in entries:
+        final_label = truncate(sanitize(bucket_id), 16) if label_counts.get(label, 0) > 1 else label
+        if not final_label:
+            continue
+        windows.append((emoji, final_label, used_pct, resets_at))
+    return windows
 
 
 def reset_window(resets_at, now):
@@ -214,15 +342,20 @@ def line_session(d, branch):
     branch = sanitize(branch or "")
     if branch:
         parts.append(f"⑂ {GREEN}{truncate(branch, 40)}{RESET}")
-    model = sanitize(((d.get("model") or {}).get("display_name") or "").replace(" context)", ")"))
+    model_obj = d.get("model") or {}
+    model_raw = model_obj.get("display_name") or model_obj.get("id") or ""
+    model = sanitize(model_raw.replace(" context)", ")"))
     if model:
         parts.append(f"🧠 {BLUE}{model}{RESET}")
-    effort = sanitize((d.get("effort") or {}).get("level") or "")
+    effort = sanitize((d.get("effort") or {}).get("level") or model_obj.get("effort") or "")
     if effort:
         parts.append(f"⚡ {GRAY}{effort}{RESET}")
     style = sanitize((d.get("output_style") or {}).get("name") or "")
     if style and style != "default":
         parts.append(f"📖 {GRAY}{style}{RESET}")
+    cycle_mode = sanitize(d.get("cycle_mode") or "")
+    if cycle_mode:
+        parts.append(f"⚙ {GRAY}{cycle_mode}{RESET}")
     if (d.get("thinking") or {}).get("enabled"):
         parts.append(f"🤔 {GRAY}on{RESET}")
     if d.get("fast_mode"):
@@ -263,20 +396,20 @@ def line_meters(d, now):
         seg = f"{GRAY}ctx{RESET} {bar(used)} {color_for(used)}{used:.0f}%{RESET}"
         size = cw.get("context_window_size")
         if size:
-            tokens = cw.get("total_input_tokens") or 0
+            tokens = cw.get("total_input_tokens")
+            if tokens is None:
+                tokens = cw.get("used_tokens") or 0
             seg += f" {GRAY}{fmt_tokens(tokens)}/{fmt_tokens(size)}{RESET}"
         segs.append(seg)
 
-    rate_limits = d.get("rate_limits") or {}
-    for emoji, key, label in (("🔥", "five_hour", "5h"), ("📅", "seven_day", "7d")):
-        window = rate_limits.get(key) or {}
-        pct = window.get("used_percentage")
-        if pct is not None:
-            segs.append(_meter(emoji, label, pct, window.get("resets_at"), now))
+    for emoji, label, pct, resets_at in quota_windows(d, now):
+        segs.append(_meter(emoji, label, pct, resets_at, now))
 
     cost = d.get("cost") or {}
     bits = []
     usd = cost.get("total_cost_usd")
+    if usd is None:
+        usd = cost.get("total_usd")
     if usd is not None:
         bits.append(f"${usd:.2f}")
     duration = cost.get("total_duration_ms")
@@ -331,12 +464,20 @@ def write_runcat(d):
     """RunCat Neo が読む使用量スナップショットを書き出す。
 
     メニューバー常駐アプリ側のスキーマなので形式を変更しない。
+    Claude Code は ~/.claude/runcat-usage.json、Antigravity CLI は
+    ~/.gemini/antigravity-cli/runcat-usage.json に分けて書き出す。
 
     @param d status line ペイロード
     """
-    out = Path.home() / ".claude" / "runcat-usage.json"
+    antigravity = is_antigravity(d)
+    if antigravity:
+        out = Path.home() / ".gemini" / "antigravity-cli" / "runcat-usage.json"
+        default_title = "Antigravity"
+    else:
+        out = Path.home() / ".claude" / "runcat-usage.json"
+        default_title = "Claude Code"
+
     ctx = (d.get("context_window") or {}).get("used_percentage")
-    rate_limits = d.get("rate_limits") or {}
 
     def metric(title, value):
         if value is None:
@@ -347,15 +488,24 @@ def write_runcat(d):
             "normalizedValue": round(value / 100, 4),
         }
 
+    model_obj = d.get("model") or {}
+    model_name = model_obj.get("display_name") or model_obj.get("id") or default_title
+    metrics = [
+        {"title": "Model", "formattedValue": model_name},
+        metric("Context", ctx),
+    ]
+    if antigravity:
+        for _, label, pct, _ in quota_windows(d, time.time()):
+            metrics.append(metric(label, round(pct, 1)))
+    else:
+        rate_limits = d.get("rate_limits") or {}
+        metrics.append(metric("5h", (rate_limits.get("five_hour") or {}).get("used_percentage")))
+        metrics.append(metric("7d", (rate_limits.get("seven_day") or {}).get("used_percentage")))
+
     snapshot = {
-        "title": "Claude Code",
+        "title": default_title,
         "symbol": "staroflife",
-        "metrics": [m for m in [
-            {"title": "Model", "formattedValue": (d.get("model") or {}).get("display_name") or "Claude Code"},
-            metric("Context", ctx),
-            metric("5h", (rate_limits.get("five_hour") or {}).get("used_percentage")),
-            metric("7d", (rate_limits.get("seven_day") or {}).get("used_percentage")),
-        ] if m is not None],
+        "metrics": [m for m in metrics if m is not None],
         "lastUpdatedDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     if ctx is not None:
@@ -387,18 +537,24 @@ def main():
             print(f"statusline: failed to update runcat-usage.json: {e}", file=sys.stderr)
 
     workspace = payload.get("workspace") or {}
-    # git_branch は OSError と SubprocessError しか見ない。current_dir が
-    # 文字列でなければ subprocess.run が TypeError を投げてそこを素通りする
-    try:
-        branch = git_branch(workspace.get("current_dir") or payload.get("cwd"))
-    except Exception:
-        branch = None
+    vcs = payload.get("vcs")
+    branch = None
+    if isinstance(vcs, dict) and isinstance(vcs.get("branch"), str) and vcs.get("branch").strip():
+        branch = vcs.get("branch").strip()
+    if not branch:
+        # git_branch は OSError と SubprocessError しか見ない。current_dir が
+        # 文字列でなければ subprocess.run が TypeError を投げてそこを素通りする
+        try:
+            branch = git_branch(workspace.get("current_dir") or payload.get("cwd"))
+        except Exception:
+            branch = None
+    in_git = branch is not None or (isinstance(vcs, dict) and bool(vcs.get("type")))
     now = time.time()
 
-    # 行ごとに独立して捕まえる。ペイロードのスキーマは Claude Code 側の都合で
+    # 行ごとに独立して捕まえる。ペイロードのスキーマはホスト CLI 側の都合で
     # 変わりうるので、1 行が型例外で落ちても残りの行は出す
     for build in (
-        lambda: line_location(payload, branch is not None),
+        lambda: line_location(payload, in_git),
         lambda: line_session(payload, branch),
         lambda: line_meters(payload, now),
     ):
