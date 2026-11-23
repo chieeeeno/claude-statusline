@@ -34,8 +34,10 @@ jobs:
 
   # 宣言している最小サポート版。ここが無いと、engines に 3.8 と書きながら
   # 3.8 で動くことを誰も確かめていない状態になる。
+  # ubuntu-latest（26.04）には actions/python-versions の Python 3.8 ビルドが
+  # 存在しないため、3.8 ビルドが提供されている ubuntu-24.04 に固定する。
   minimum-python:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
