@@ -315,7 +315,7 @@ const ANSI_YELLOW = "\x1b[33m";
 const CURSOR_HIDE = "\x1b[?25l";
 const CURSOR_SHOW = "\x1b[?25h";
 const ANSI_CSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
-const CONTROL_CHAR_RE = /[\x00-\x1f\x7f-\x9f]/g;
+const CONTROL_CHAR_RE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
 
 interface CheckboxOption {
   id: TargetId;
@@ -526,13 +526,18 @@ async function runCheckboxPrompt(
   }
 
   return new Promise<TargetId[] | null>((resolve) => {
-    const cleanup = (): void => {
+    const cleanup = (finalChunk = ""): void => {
       if (finished) return;
       finished = true;
       input.off("keypress", onKeypress);
       input.off("end", onStreamEnd);
       input.off("close", onStreamEnd);
-      if (registerSignal) process.off("SIGTERM", onSigterm);
+      if (registerSignal) {
+        process.off("SIGTERM", onSigterm);
+        process.off("SIGINT", onSigint);
+      }
+      // macOS 等の libuv uv_tty_set_mode は TCSADRAIN で出力バッファが空になるまで待つため、
+      // 最終出力を書き込む前に raw mode を戻してデッドロックを防ぐ。
       if (rawActivated && typeof input.setRawMode === "function") {
         try {
           input.setRawMode(wasRaw);
@@ -541,10 +546,9 @@ async function runCheckboxPrompt(
         }
       }
       input.pause();
-      if (cursorHidden) {
-        output.write(CURSOR_SHOW);
-        cursorHidden = false;
-      }
+      const tail = cursorHidden ? `${finalChunk}${CURSOR_SHOW}` : finalChunk;
+      cursorHidden = false;
+      if (tail) output.write(tail);
     };
 
     const draw = (nextState: CheckboxState): void => {
@@ -570,27 +574,28 @@ async function runCheckboxPrompt(
       if (result.kind === "submit") {
         const moveUp = prevPhysicalLines > 1 ? `\x1b[${prevPhysicalLines - 1}A` : "";
         const summary = formatCheckboxSummary(state.action, result.selected, { color });
-        output.write(`\r${moveUp}\x1b[J${summary}\n`);
-        cleanup();
+        cleanup(`\r${moveUp}\x1b[J${summary}\n`);
         resolve(result.selected);
         return;
       }
-      output.write("\n");
-      cleanup();
+      cleanup("\n");
       resolve(null);
     };
 
     const onStreamEnd = (): void => {
       if (finished) return;
-      output.write("\n");
-      cleanup();
+      cleanup("\n");
       resolve(null);
     };
 
     const onSigterm = (): void => {
-      output.write("\n");
-      cleanup();
+      cleanup("\n");
       process.exit(143);
+    };
+
+    const onSigint = (): void => {
+      cleanup("\n");
+      process.exit(130);
     };
 
     readlineEvents.emitKeypressEvents(input);
@@ -601,7 +606,10 @@ async function runCheckboxPrompt(
     input.on("keypress", onKeypress);
     input.once("end", onStreamEnd);
     input.once("close", onStreamEnd);
-    if (registerSignal) process.once("SIGTERM", onSigterm);
+    if (registerSignal) {
+      process.once("SIGTERM", onSigterm);
+      process.once("SIGINT", onSigint);
+    }
     input.resume();
   });
 }
@@ -1049,7 +1057,8 @@ function printVersion(): void {
       console.log(`installed (${target.label}): legacy (package path)`);
     } else {
       const installed = readInstalledVersion(target);
-      console.log(`installed (${target.label}): ${installed ?? "unknown"}`);
+      const safeInstalled = installed ? sanitizeTerminalText(installed) : "";
+      console.log(`installed (${target.label}): ${safeInstalled || "unknown"}`);
     }
   }
 }

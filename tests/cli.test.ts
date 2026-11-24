@@ -641,7 +641,7 @@ test("stepCheckboxState はカーソル移動・Space トグル・全選択・�
 test("renderCheckboxMenu は選択状態・バッジ・警告を描画し version の制御文字を除去する", () => {
   const options = cli.buildCheckboxOptions(
     { claude: "installed", antigravity: "other" },
-    { claude: "2.3.0\x1b]52;c;evil\x07", antigravity: null }
+    { claude: "2.3.0\x1b]52;c;evil\x07\u202e9\u2028X", antigravity: null }
   );
   const lines = cli.renderCheckboxMenu(
     {
@@ -655,9 +655,14 @@ test("renderCheckboxMenu は選択状態・バッジ・警告を描画し versio
   );
   assert.equal(lines.length, 4);
   assert.match(lines[0] ?? "", /Select targets to install statusLine/);
-  assert.match(lines[1] ?? "", /^❯ ◉ Claude Code \(~\/\.claude\/settings\.json\) \[installed v2\.3\.0\]52;c;evil\]$/);
+  assert.match(
+    lines[1] ?? "",
+    /^❯ ◉ Claude Code \(~\/\.claude\/settings\.json\) \[installed v2\.3\.0\]52;c;evil9X\]$/
+  );
   assert.equal((lines[1] ?? "").includes("\x1b"), false);
   assert.equal((lines[1] ?? "").includes("\x07"), false);
+  assert.equal((lines[1] ?? "").includes("\u202e"), false);
+  assert.equal((lines[1] ?? "").includes("\u2028"), false);
   assert.match(
     lines[2] ?? "",
     /^  ◯ Antigravity CLI \(~\/\.gemini\/antigravity-cli\/settings\.json\) \[other tool configured\]$/
@@ -666,6 +671,22 @@ test("renderCheckboxMenu は選択状態・バッジ・警告を描画し versio
 
   const summary = cli.formatCheckboxSummary("install", ["claude", "antigravity"], { color: false });
   assert.equal(summary, "✔ Select targets to install statusLine: Claude Code, Antigravity CLI");
+});
+
+test("--version は version ファイル内の制御文字・BiDi 文字を除去して表示する", (t: TestContext) => {
+  const home = makeHome(t);
+  assert.equal(run(["--install", "--python", REAL_PYTHON], home).code, 0);
+  fs.writeFileSync(
+    path.join(claudeInstallDir(home), "version"),
+    "2.3.0\x1b]52;c;cHdu\x07\u202e9\n",
+    "utf8"
+  );
+  const r = run(["--version"], home);
+  assert.equal(r.code, 0);
+  assert.equal(r.stdout.includes("\x1b"), false);
+  assert.equal(r.stdout.includes("\x07"), false);
+  assert.equal(r.stdout.includes("\u202e"), false);
+  assert.match(r.stdout, /installed \(Claude Code\): 2\.3\.0\]52;c;cHdu9/);
 });
 
 test("countPhysicalLines は ANSI を除いた可視文字数で折り返し行数を計算する", () => {
