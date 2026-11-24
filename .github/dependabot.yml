@@ -8,7 +8,9 @@ version: 2
 # bun エコシステムで回す。
 updates:
   - package-ecosystem: github-actions
-    directory: /
+    directories:
+      - "/"
+      - "/.github/actions/*"
     schedule:
       interval: weekly
     commit-message:
