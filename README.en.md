@@ -33,15 +33,12 @@ under each CLI (`~/.claude/claude-statusline/statusline.py` for Claude Code,
 `settings.json` directly at that copy — so clearing the `npx` cache never breaks it, and Node is
 never started at render time.
 
-On an interactive terminal (TTY), `--install` displays the current status of each CLI and asks
-which target to configure:
+On an interactive terminal (TTY), `--install` displays the current status of each CLI in a checkbox menu (`↑↓` to move, `Space` to toggle, `a` to toggle all, `Enter` to confirm):
 
 ```
-Select target to install statusLine:
-  1) Claude Code (~/.claude/settings.json) [installed v2.1.0]
-  2) Antigravity CLI (~/.gemini/antigravity-cli/settings.json) [not installed]
-  3) Both
-Enter choice [1-3] (default: 1):
+Select targets to install statusLine (↑↓ move, Space toggle, a all, Enter confirm, Esc cancel):
+❯ ◉ Claude Code (~/.claude/settings.json) [installed v2.3.0]
+  ◯ Antigravity CLI (~/.gemini/antigravity-cli/settings.json) [not installed]
 ```
 
 That writes a `statusLine` entry into the target `settings.json` (`~/.claude/settings.json` for
