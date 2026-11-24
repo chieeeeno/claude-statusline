@@ -1,0 +1,108 @@
+name: Run CLI tests and npx E2E
+description: Build the CLI, run node:test suite, and verify npx tarball install, render, and uninstall end to end.
+
+inputs:
+  node-version:
+    description: Node.js version to test with
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: ${{ inputs.node-version }}
+    - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+    - name: Install dev dependencies and build
+      shell: bash
+      run: bun install --frozen-lockfile && bun run build
+    # run_suite.ts は node --test を包んで件数の下限を見る。テストファイルを
+    # 空にすると node --test は exit 0 を返すため、素で呼ぶと緑になる。
+    # 実行ランタイム（Node）と検証ランタイムを一致させるため、CI は node で回す。
+    - name: Run CLI tests
+      shell: bash
+      run: node tests/run_suite.ts
+    # npx は既存のグローバルインストールを優先するため、グローバル版が無い CI ランナー上で
+    # tarball → npx --install → キャッシュ削除 → 描画 → --uninstall までを一気通貫で検証する。
+    - name: Verify npx tarball install end to end
+      shell: bash
+      run: |
+        set -euo pipefail
+        PACK_DIR="$(mktemp -d)"
+        TMP_HOME="$(mktemp -d)"
+        NPM_CACHE="$(mktemp -d)"
+        trap 'rm -rf "$PACK_DIR" "$TMP_HOME" "$NPM_CACHE"' EXIT
+
+        npm pack --ignore-scripts --pack-destination "$PACK_DIR" >/dev/null
+        TARBALL="$(ls "$PACK_DIR"/*.tgz)"
+
+        HOME="$TMP_HOME" npm_config_cache="$NPM_CACHE" \
+          npx --yes --package="$TARBALL" claude-statusline --install --target all
+
+        # npx キャッシュを消したあとでもコピー先スクリプトが動き続けることを検証する
+        rm -rf "$NPM_CACHE"
+
+        TMP_HOME="$TMP_HOME" node -e '
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const { execFileSync } = require("node:child_process");
+          const home = process.env.TMP_HOME;
+          const repo = process.cwd();
+          const payload = JSON.stringify({
+            model: { display_name: "Opus 5" },
+            context_window: { used_percentage: 25, total_input_tokens: 50000, context_window_size: 200000 },
+          });
+          const targets = [
+            {
+              settings: path.join(home, ".claude", "settings.json"),
+              script: path.join(home, ".claude", "claude-statusline", "statusline.py"),
+            },
+            {
+              settings: path.join(home, ".gemini", "antigravity-cli", "settings.json"),
+              script: path.join(home, ".gemini", "antigravity-cli", "claude-statusline", "statusline.py"),
+            },
+          ];
+          for (const t of targets) {
+            const cfg = JSON.parse(fs.readFileSync(t.settings, "utf8"));
+            const cmd = cfg.statusLine && cfg.statusLine.command;
+            if (!cmd || !cmd.includes(t.script)) {
+              throw new Error(`unexpected command in ${t.settings}: ${cmd}`);
+            }
+            if (cmd.includes("_npx") || cmd.includes(repo)) {
+              throw new Error(`command leaks ephemeral path: ${cmd}`);
+            }
+            const out = execFileSync("/bin/sh", ["-c", cmd], {
+              env: { ...process.env, HOME: home },
+              input: payload,
+              encoding: "utf8",
+            });
+            if (!out.includes("Opus 5")) {
+              throw new Error(`render output missing model: ${out}`);
+            }
+          }
+        '
+
+        NPM_CACHE="$(mktemp -d)"
+        VER_OUT="$(HOME="$TMP_HOME" npm_config_cache="$NPM_CACHE" \
+          npx --yes --package="$TARBALL" claude-statusline --version)"
+        echo "$VER_OUT"
+        echo "$VER_OUT" | grep -q "installed (Claude Code):"
+        echo "$VER_OUT" | grep -q "installed (Antigravity CLI):"
+
+        HOME="$TMP_HOME" npm_config_cache="$NPM_CACHE" \
+          npx --yes --package="$TARBALL" claude-statusline --uninstall --target all
+
+        test ! -e "$TMP_HOME/.claude/claude-statusline"
+        test ! -e "$TMP_HOME/.gemini/antigravity-cli/claude-statusline"
+        TMP_HOME="$TMP_HOME" node -e '
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const home = process.env.TMP_HOME;
+          for (const file of [
+            path.join(home, ".claude", "settings.json"),
+            path.join(home, ".gemini", "antigravity-cli", "settings.json"),
+          ]) {
+            const cfg = JSON.parse(fs.readFileSync(file, "utf8"));
+            if ("statusLine" in cfg) throw new Error(`statusLine still present in ${file}`);
+          }
+        '
