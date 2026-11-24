@@ -38,6 +38,7 @@ const assert: typeof import("node:assert/strict") = require("node:assert/strict"
 const fs = require("node:fs") as typeof import("node:fs");
 const os = require("node:os") as typeof import("node:os");
 const path = require("node:path") as typeof import("node:path");
+const { PassThrough } = require("node:stream") as typeof import("node:stream");
 const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
 
 const ROOT = path.join(__dirname, "..");
@@ -544,6 +545,242 @@ test("parseTargetChoice は番号・名前・空入力を解釈し不正値を�
   assert.deepEqual(cli.parseTargetChoice("all"), ["claude", "antigravity"]);
   assert.equal(cli.parseTargetChoice("9"), null);
   assert.equal(cli.parseTargetChoice("foo"), null);
+});
+
+// --- チェックボックス UI の単体・統合テスト ----------------------------
+
+test("initialSelectedTargets は既導入ターゲットと未導入時の既定値を返す", () => {
+  assert.deepEqual(
+    cli.initialSelectedTargets("install", { claude: "not installed", antigravity: "not installed" }),
+    ["claude"]
+  );
+  assert.deepEqual(
+    cli.initialSelectedTargets("install", { claude: "not installed", antigravity: "installed" }),
+    ["antigravity"]
+  );
+  assert.deepEqual(
+    cli.initialSelectedTargets("install", { claude: "installed", antigravity: "installed" }),
+    ["claude", "antigravity"]
+  );
+  assert.deepEqual(
+    cli.initialSelectedTargets("uninstall", {
+      claude: "not installed",
+      antigravity: "not installed",
+    }),
+    []
+  );
+  assert.deepEqual(
+    cli.initialSelectedTargets("uninstall", { claude: "other", antigravity: "installed" }),
+    ["antigravity"]
+  );
+});
+
+test("stepCheckboxState はカーソル移動・Space トグル・全選択・確定・0件警告・キャンセルを処理する", () => {
+  const options = cli.buildCheckboxOptions(
+    { claude: "installed", antigravity: "not installed" },
+    { claude: "2.3.0", antigravity: null }
+  );
+  let state: Parameters<CliModule["stepCheckboxState"]>[0] = {
+    action: "install",
+    options,
+    cursor: 0,
+    selected: new Set<"claude" | "antigravity">(["claude"]),
+    error: null,
+  };
+
+  // 先頭から ↑ で末尾にラップ
+  let res = cli.stepCheckboxState(state, { name: "up" });
+  assert.equal(res.kind, "continue");
+  state = res.state;
+  assert.equal(state.cursor, 1);
+
+  // Space で Antigravity を追加選択
+  res = cli.stepCheckboxState(state, { name: "space" });
+  assert.equal(res.kind, "continue");
+  state = res.state;
+  assert.deepEqual([...state.selected].sort(), ["antigravity", "claude"]);
+
+  // Enter で定義順（claude, antigravity）で確定
+  res = cli.stepCheckboxState(state, { name: "return" });
+  assert.equal(res.kind, "submit");
+  assert.deepEqual(res.selected, ["claude", "antigravity"]);
+
+  // a で全選択 → 全解除 → 0 件 Enter で警告
+  res = cli.stepCheckboxState(state, { name: "a" });
+  assert.equal(res.kind, "continue");
+  state = res.state;
+  assert.equal(state.selected.size, 0);
+
+  res = cli.stepCheckboxState(state, { name: "return" });
+  assert.equal(res.kind, "continue");
+  state = res.state;
+  assert.match(state.error ?? "", /Select at least one target/);
+
+  // 再度 a で全選択すると警告が消える
+  res = cli.stepCheckboxState(state, { name: "a" });
+  assert.equal(res.kind, "continue");
+  state = res.state;
+  assert.equal(state.error, null);
+  assert.equal(state.selected.size, 2);
+
+  // j / k でも移動し末尾から先頭へラップ
+  res = cli.stepCheckboxState(state, { name: "j" });
+  assert.equal(res.kind, "continue");
+  assert.equal(res.state.cursor, 0);
+  res = cli.stepCheckboxState(res.state, { name: "k" });
+  assert.equal(res.kind, "continue");
+  assert.equal(res.state.cursor, 1);
+
+  // Ctrl+C / Ctrl+D / Esc / q はキャンセル
+  assert.equal(cli.stepCheckboxState(state, { name: "c", ctrl: true }).kind, "cancel");
+  assert.equal(cli.stepCheckboxState(state, { name: "d", ctrl: true }).kind, "cancel");
+  assert.equal(cli.stepCheckboxState(state, { name: "escape" }).kind, "cancel");
+  assert.equal(cli.stepCheckboxState(state, { name: "q" }).kind, "cancel");
+});
+
+test("renderCheckboxMenu は選択状態・バッジ・警告を描画し version の制御文字を除去する", () => {
+  const options = cli.buildCheckboxOptions(
+    { claude: "installed", antigravity: "other" },
+    { claude: "2.3.0\x1b]52;c;evil\x07", antigravity: null }
+  );
+  const lines = cli.renderCheckboxMenu(
+    {
+      action: "install",
+      options,
+      cursor: 0,
+      selected: new Set(["claude"]),
+      error: "Select at least one target (press Space to toggle).",
+    },
+    { color: false }
+  );
+  assert.equal(lines.length, 4);
+  assert.match(lines[0] ?? "", /Select targets to install statusLine/);
+  assert.match(lines[1] ?? "", /^❯ ◉ Claude Code \(~\/\.claude\/settings\.json\) \[installed v2\.3\.0\]52;c;evil\]$/);
+  assert.equal((lines[1] ?? "").includes("\x1b"), false);
+  assert.equal((lines[1] ?? "").includes("\x07"), false);
+  assert.match(
+    lines[2] ?? "",
+    /^  ◯ Antigravity CLI \(~\/\.gemini\/antigravity-cli\/settings\.json\) \[other tool configured\]$/
+  );
+  assert.match(lines[3] ?? "", /Select at least one target/);
+
+  const summary = cli.formatCheckboxSummary("install", ["claude", "antigravity"], { color: false });
+  assert.equal(summary, "✔ Select targets to install statusLine: Claude Code, Antigravity CLI");
+});
+
+test("countPhysicalLines は ANSI を除いた可視文字数で折り返し行数を計算する", () => {
+  assert.equal(cli.countPhysicalLines(["abc", "def"], 80), 2);
+  assert.equal(cli.countPhysicalLines(["\x1b[32m1234567890\x1b[0m"], 10), 1);
+  assert.equal(cli.countPhysicalLines(["\x1b[32m12345678901\x1b[0m"], 10), 2);
+  assert.equal(cli.countPhysicalLines(["a", "b"], undefined), 2);
+});
+
+test("runCheckboxPrompt はキー入力で複数選択でき raw mode とカーソルを復元する", async () => {
+  const rawHistory: boolean[] = [];
+  const input = Object.assign(new PassThrough(), {
+    isRaw: false,
+    setRawMode(mode: boolean) {
+      this.isRaw = mode;
+      rawHistory.push(mode);
+    },
+  });
+  let rendered = "";
+  const output = {
+    columns: 120,
+    write(chunk: string) {
+      rendered += chunk;
+      return true;
+    },
+  };
+  const initialState = {
+    action: "install" as const,
+    options: cli.buildCheckboxOptions(
+      { claude: "not installed", antigravity: "not installed" },
+      { claude: null, antigravity: null }
+    ),
+    cursor: 0,
+    selected: new Set<"claude" | "antigravity">(["claude"]),
+    error: null,
+  };
+
+  const promise = cli.runCheckboxPrompt(initialState, { input, output, color: false });
+  // ↓ → Space（Antigravity 追加）→ Enter（確定）
+  input.write("\x1b[B");
+  input.write(" ");
+  input.write("\r");
+
+  const chosen = await promise;
+  assert.deepEqual(chosen, ["claude", "antigravity"]);
+  assert.deepEqual(rawHistory, [true, false]);
+  assert.equal(input.isRaw, false);
+  assert.ok(rendered.includes("\x1b[?25l"));
+  assert.ok(rendered.endsWith("\x1b[?25h"));
+  assert.ok(rendered.includes("✔ Select targets to install statusLine: Claude Code, Antigravity CLI"));
+});
+
+test("runCheckboxPrompt は 0 件確定の警告後に再選択でき Ctrl+C キャンセル時も端末を復元する", async () => {
+  const makeMock = () => {
+    const rawHistory: boolean[] = [];
+    const input = Object.assign(new PassThrough(), {
+      isRaw: false,
+      setRawMode(mode: boolean) {
+        this.isRaw = mode;
+        rawHistory.push(mode);
+      },
+    });
+    let rendered = "";
+    const output = {
+      columns: 120,
+      write(chunk: string) {
+        rendered += chunk;
+        return true;
+      },
+    };
+    return { input, output, rawHistory, getRendered: () => rendered };
+  };
+
+  const baseOptions = cli.buildCheckboxOptions(
+    { claude: "not installed", antigravity: "not installed" },
+    { claude: null, antigravity: null }
+  );
+
+  // 0 件で Enter → 警告 → Space → Enter で確定
+  const m1 = makeMock();
+  const p1 = cli.runCheckboxPrompt(
+    { action: "uninstall", options: baseOptions, cursor: 0, selected: new Set(), error: null },
+    { input: m1.input, output: m1.output, color: false }
+  );
+  m1.input.write("\r");
+  m1.input.write(" ");
+  m1.input.write("\r");
+  assert.deepEqual(await p1, ["claude"]);
+  assert.ok(m1.getRendered().includes("Select at least one target"));
+  assert.deepEqual(m1.rawHistory, [true, false]);
+  assert.ok(m1.getRendered().endsWith("\x1b[?25h"));
+
+  // Ctrl+C でキャンセル → null が返り raw mode とカーソルが復元される
+  const m2 = makeMock();
+  const p2 = cli.runCheckboxPrompt(
+    { action: "install", options: baseOptions, cursor: 0, selected: new Set(["claude"]), error: null },
+    { input: m2.input, output: m2.output, color: false }
+  );
+  m2.input.write("\x03");
+  assert.equal(await p2, null);
+  assert.deepEqual(m2.rawHistory, [true, false]);
+  assert.equal(m2.input.isRaw, false);
+  assert.ok(m2.getRendered().endsWith("\x1b[?25h"));
+
+  // 入力ストリームが途中で閉じてもハングせず null を返して端末を復元する
+  const m3 = makeMock();
+  const p3 = cli.runCheckboxPrompt(
+    { action: "install", options: baseOptions, cursor: 0, selected: new Set(["claude"]), error: null },
+    { input: m3.input, output: m3.output, color: false }
+  );
+  m3.input.end();
+  assert.equal(await p3, null);
+  assert.deepEqual(m3.rawHistory, [true, false]);
+  assert.equal(m3.input.isRaw, false);
+  assert.ok(m3.getRendered().endsWith("\x1b[?25h"));
 });
 
 test("inspectTargetStatus は未導入・導入済み・他ツール設定を判別する", (t: TestContext) => {

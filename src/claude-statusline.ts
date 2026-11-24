@@ -4,6 +4,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as readlineEvents from "node:readline";
 import * as readline from "node:readline/promises";
 import { execFileSync, spawnSync } from "node:child_process";
 
@@ -304,10 +305,305 @@ function inspectTargetStatus(target: TargetSpec): InstallStatus {
   return inspectTargetDetail(target).status;
 }
 
+const TARGET_ORDER: readonly TargetId[] = ["claude", "antigravity"];
+
+const ANSI_RESET = "\x1b[0m";
+const ANSI_DIM = "\x1b[2m";
+const ANSI_CYAN = "\x1b[36m";
+const ANSI_GREEN = "\x1b[32m";
+const ANSI_YELLOW = "\x1b[33m";
+const CURSOR_HIDE = "\x1b[?25l";
+const CURSOR_SHOW = "\x1b[?25h";
+const ANSI_CSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
+const CONTROL_CHAR_RE = /[\x00-\x1f\x7f-\x9f]/g;
+
+interface CheckboxOption {
+  id: TargetId;
+  label: string;
+  detail: string;
+  badge: string;
+}
+
+interface CheckboxState {
+  action: "install" | "uninstall";
+  options: readonly CheckboxOption[];
+  cursor: number;
+  selected: ReadonlySet<TargetId>;
+  error: string | null;
+}
+
+interface CheckboxKey {
+  name?: string;
+  ctrl?: boolean;
+  meta?: boolean;
+  shift?: boolean;
+}
+
+type CheckboxStepResult =
+  | { kind: "continue"; state: CheckboxState }
+  | { kind: "submit"; selected: TargetId[] }
+  | { kind: "cancel" };
+
+interface CheckboxInputStream extends NodeJS.ReadableStream {
+  isRaw?: boolean;
+  setRawMode?: (mode: boolean) => void;
+}
+
+interface CheckboxOutputStream {
+  write: (chunk: string) => boolean;
+  columns?: number;
+}
+
+/** 端末エスケープや改行を含む制御文字を除去する。version ファイル汚染対策。 */
+function sanitizeTerminalText(s: string): string {
+  return s.replace(CONTROL_CHAR_RE, "");
+}
+
+function stripAnsi(s: string): string {
+  return s.replace(ANSI_CSI_RE, "");
+}
+
+/** 端末幅での行折り返しを考慮した物理占有行数を返す。 */
+function countPhysicalLines(lines: readonly string[], columns?: number): number {
+  const width = typeof columns === "number" && columns > 0 ? Math.floor(columns) : 0;
+  if (width === 0) return Math.max(1, lines.length);
+  let total = 0;
+  for (const line of lines) {
+    const len = stripAnsi(line).length;
+    total += Math.max(1, Math.ceil(len / width));
+  }
+  return Math.max(1, total);
+}
+
 function statusBadge(status: InstallStatus, version?: string | null): string {
-  if (status === "installed") return version ? `[installed v${version}]` : "[installed]";
+  if (status === "installed") {
+    const clean = version ? sanitizeTerminalText(version) : "";
+    return clean ? `[installed v${clean}]` : "[installed]";
+  }
   if (status === "other") return "[other tool configured]";
   return "[not installed]";
+}
+
+/**
+ * 対話チェックボックスの初期選択状態を決める。
+ *
+ * 導入済みターゲットがある場合はそれらを初期チェックし（更新やアンインストール時に
+ * そのまま Enter で対象へ適用できる）、未導入時のインストールは後方互換として
+ * Claude Code を初期チェックする。
+ */
+function initialSelectedTargets(
+  action: "install" | "uninstall",
+  statuses: Record<TargetId, InstallStatus>
+): TargetId[] {
+  const installed = TARGET_ORDER.filter((id) => statuses[id] === "installed");
+  if (installed.length > 0) return installed;
+  return action === "install" ? ["claude"] : [];
+}
+
+function buildCheckboxOptions(
+  statuses: Record<TargetId, InstallStatus>,
+  versions?: Partial<Record<TargetId, string | null>>
+): CheckboxOption[] {
+  return TARGET_ORDER.map((id) => ({
+    id,
+    label: TARGETS[id].label,
+    detail: TARGETS[id].displayPath,
+    badge: statusBadge(statuses[id], versions?.[id]),
+  }));
+}
+
+/** チェックボックス UI の 1 キー入力に対する状態遷移（純粋関数）。 */
+function stepCheckboxState(state: CheckboxState, key: CheckboxKey): CheckboxStepResult {
+  if (
+    (key.ctrl && (key.name === "c" || key.name === "d")) ||
+    key.name === "escape" ||
+    (!key.ctrl && !key.meta && key.name === "q")
+  ) {
+    return { kind: "cancel" };
+  }
+
+  const count = state.options.length;
+  if (count === 0) return { kind: "cancel" };
+
+  if (key.name === "up" || (!key.ctrl && !key.meta && key.name === "k")) {
+    return {
+      kind: "continue",
+      state: { ...state, cursor: (state.cursor - 1 + count) % count, error: null },
+    };
+  }
+  if (key.name === "down" || (!key.ctrl && !key.meta && key.name === "j")) {
+    return {
+      kind: "continue",
+      state: { ...state, cursor: (state.cursor + 1) % count, error: null },
+    };
+  }
+  if (key.name === "space") {
+    const current = state.options[state.cursor];
+    if (!current) return { kind: "continue", state };
+    const next = new Set(state.selected);
+    if (next.has(current.id)) next.delete(current.id);
+    else next.add(current.id);
+    return { kind: "continue", state: { ...state, selected: next, error: null } };
+  }
+  if (!key.ctrl && !key.meta && key.name === "a") {
+    const allSelected = state.options.every((opt) => state.selected.has(opt.id));
+    const next = allSelected ? new Set<TargetId>() : new Set(state.options.map((opt) => opt.id));
+    return { kind: "continue", state: { ...state, selected: next, error: null } };
+  }
+  if (key.name === "return" || key.name === "enter") {
+    const selected = state.options.map((opt) => opt.id).filter((id) => state.selected.has(id));
+    if (selected.length === 0) {
+      return {
+        kind: "continue",
+        state: { ...state, error: "Select at least one target (press Space to toggle)." },
+      };
+    }
+    return { kind: "submit", selected };
+  }
+  return { kind: "continue", state };
+}
+
+function renderCheckboxMenu(state: CheckboxState, opts?: { color?: boolean }): string[] {
+  const color = opts?.color ?? false;
+  const paint = (code: string, text: string): string =>
+    color ? `${code}${text}${ANSI_RESET}` : text;
+  const hint = paint(ANSI_DIM, "(↑↓ move, Space toggle, a all, Enter confirm, Esc cancel)");
+  const lines = [`Select targets to ${state.action} statusLine ${hint}:`];
+  for (let i = 0; i < state.options.length; i++) {
+    const opt = state.options[i];
+    if (!opt) continue;
+    const active = i === state.cursor;
+    const checked = state.selected.has(opt.id);
+    const pointer = active ? paint(ANSI_CYAN, "❯") : " ";
+    const box = checked ? paint(ANSI_GREEN, "◉") : paint(ANSI_DIM, "◯");
+    const label = active ? paint(ANSI_CYAN, opt.label) : opt.label;
+    const detail = paint(ANSI_DIM, `(${opt.detail}) ${opt.badge}`);
+    lines.push(`${pointer} ${box} ${label} ${detail}`);
+  }
+  if (state.error) {
+    lines.push(`  ${paint(ANSI_YELLOW, state.error)}`);
+  }
+  return lines;
+}
+
+function formatCheckboxSummary(
+  action: "install" | "uninstall",
+  selected: readonly TargetId[],
+  opts?: { color?: boolean }
+): string {
+  const color = opts?.color ?? false;
+  const mark = color ? `${ANSI_GREEN}✔${ANSI_RESET}` : "✔";
+  const names = selected.map((id) => TARGETS[id].label).join(", ");
+  return `${mark} Select targets to ${action} statusLine: ${names}`;
+}
+
+/**
+ * raw mode + keypress イベントでチェックボックスプロンプトを実行する。
+ *
+ * 確定時は選択された TargetId[] を、キャンセルやストリーム終了時は null を返す。
+ * 終了経路にかかわらず、必ず raw mode とカーソル表示を元の状態へ復元する。
+ */
+async function runCheckboxPrompt(
+  initialState: CheckboxState,
+  opts: {
+    input: CheckboxInputStream;
+    output: CheckboxOutputStream;
+    color?: boolean;
+    registerSignal?: boolean;
+  }
+): Promise<TargetId[] | null> {
+  const { input, output, color = false, registerSignal = false } = opts;
+  const wasRaw = Boolean(input.isRaw);
+  let state = initialState;
+  let prevPhysicalLines = 0;
+  let rawActivated = false;
+  let cursorHidden = false;
+  let finished = false;
+
+  if (typeof input.setRawMode === "function") {
+    input.setRawMode(true);
+    rawActivated = true;
+  }
+
+  return new Promise<TargetId[] | null>((resolve) => {
+    const cleanup = (): void => {
+      if (finished) return;
+      finished = true;
+      input.off("keypress", onKeypress);
+      input.off("end", onStreamEnd);
+      input.off("close", onStreamEnd);
+      if (registerSignal) process.off("SIGTERM", onSigterm);
+      if (rawActivated && typeof input.setRawMode === "function") {
+        try {
+          input.setRawMode(wasRaw);
+        } catch {
+          // 既に閉じた端末での復元エラーは握りつぶす
+        }
+      }
+      input.pause();
+      if (cursorHidden) {
+        output.write(CURSOR_SHOW);
+        cursorHidden = false;
+      }
+    };
+
+    const draw = (nextState: CheckboxState): void => {
+      const lines = renderCheckboxMenu(nextState, { color });
+      const frame = lines.join("\n");
+      if (prevPhysicalLines === 0) {
+        output.write(frame);
+      } else {
+        const moveUp = prevPhysicalLines > 1 ? `\x1b[${prevPhysicalLines - 1}A` : "";
+        output.write(`\r${moveUp}\x1b[J${frame}`);
+      }
+      prevPhysicalLines = countPhysicalLines(lines, output.columns);
+    };
+
+    const onKeypress = (_str: string | undefined, key: CheckboxKey | undefined): void => {
+      if (finished || !key) return;
+      const result = stepCheckboxState(state, key);
+      if (result.kind === "continue") {
+        state = result.state;
+        draw(state);
+        return;
+      }
+      if (result.kind === "submit") {
+        const moveUp = prevPhysicalLines > 1 ? `\x1b[${prevPhysicalLines - 1}A` : "";
+        const summary = formatCheckboxSummary(state.action, result.selected, { color });
+        output.write(`\r${moveUp}\x1b[J${summary}\n`);
+        cleanup();
+        resolve(result.selected);
+        return;
+      }
+      output.write("\n");
+      cleanup();
+      resolve(null);
+    };
+
+    const onStreamEnd = (): void => {
+      if (finished) return;
+      output.write("\n");
+      cleanup();
+      resolve(null);
+    };
+
+    const onSigterm = (): void => {
+      output.write("\n");
+      cleanup();
+      process.exit(143);
+    };
+
+    readlineEvents.emitKeypressEvents(input);
+    output.write(CURSOR_HIDE);
+    cursorHidden = true;
+    draw(state);
+
+    input.on("keypress", onKeypress);
+    input.once("end", onStreamEnd);
+    input.once("close", onStreamEnd);
+    if (registerSignal) process.once("SIGTERM", onSigterm);
+    input.resume();
+  });
 }
 
 function formatTargetMenu(
@@ -334,20 +630,12 @@ function parseTargetChoice(input: string): TargetId[] | null {
   return null;
 }
 
-async function promptTargetSelection(action: "install" | "uninstall"): Promise<TargetId[]> {
-  const details: Record<TargetId, TargetInspection> = {
-    claude: inspectTargetDetail(TARGETS.claude),
-    antigravity: inspectTargetDetail(TARGETS.antigravity),
-  };
-  const statuses: Record<TargetId, InstallStatus> = {
-    claude: details.claude.status,
-    antigravity: details.antigravity.status,
-  };
-  const versions: Record<TargetId, string | null> = {
-    claude: details.claude.kind === "copied" ? readInstalledVersion(TARGETS.claude) : null,
-    antigravity:
-      details.antigravity.kind === "copied" ? readInstalledVersion(TARGETS.antigravity) : null,
-  };
+/** raw mode 非対応の TTY（TERM=dumb 等）向け行入力フォールバック。 */
+async function promptTargetSelectionFallback(
+  action: "install" | "uninstall",
+  statuses: Record<TargetId, InstallStatus>,
+  versions: Record<TargetId, string | null>
+): Promise<TargetId[]> {
   console.log(formatTargetMenu(action, statuses, versions));
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -367,6 +655,53 @@ async function promptTargetSelection(action: "install" | "uninstall"): Promise<T
     process.exit(1);
   }
   return chosen;
+}
+
+async function promptTargetSelection(action: "install" | "uninstall"): Promise<TargetId[]> {
+  const details: Record<TargetId, TargetInspection> = {
+    claude: inspectTargetDetail(TARGETS.claude),
+    antigravity: inspectTargetDetail(TARGETS.antigravity),
+  };
+  const statuses: Record<TargetId, InstallStatus> = {
+    claude: details.claude.status,
+    antigravity: details.antigravity.status,
+  };
+  const versions: Record<TargetId, string | null> = {
+    claude: details.claude.kind === "copied" ? readInstalledVersion(TARGETS.claude) : null,
+    antigravity:
+      details.antigravity.kind === "copied" ? readInstalledVersion(TARGETS.antigravity) : null,
+  };
+
+  const canUseCheckbox =
+    typeof process.stdin.setRawMode === "function" && process.env.TERM !== "dumb";
+  if (canUseCheckbox) {
+    const initialState: CheckboxState = {
+      action,
+      options: buildCheckboxOptions(statuses, versions),
+      cursor: 0,
+      selected: new Set(initialSelectedTargets(action, statuses)),
+      error: null,
+    };
+    const color = !(process.env.NO_COLOR && process.env.NO_COLOR.length > 0);
+    let chosen: TargetId[] | null;
+    try {
+      chosen = await runCheckboxPrompt(initialState, {
+        input: process.stdin,
+        output: process.stdout,
+        color,
+        registerSignal: true,
+      });
+    } catch {
+      return promptTargetSelectionFallback(action, statuses, versions);
+    }
+    if (!chosen) {
+      console.error("claude-statusline: cancelled.");
+      process.exit(1);
+    }
+    return chosen;
+  }
+
+  return promptTargetSelectionFallback(action, statuses, versions);
 }
 
 async function resolveTargets(
@@ -829,6 +1164,13 @@ export {
   readInstalledVersion,
   inspectTargetDetail,
   inspectTargetStatus,
+  initialSelectedTargets,
+  buildCheckboxOptions,
+  stepCheckboxState,
+  renderCheckboxMenu,
+  formatCheckboxSummary,
+  countPhysicalLines,
+  runCheckboxPrompt,
   formatTargetMenu,
   parseTargetChoice,
   parseArgs,

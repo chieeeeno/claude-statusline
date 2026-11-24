@@ -24,14 +24,12 @@ npx @chieeeeno/claude-statusline --install
 
 グローバルインストールは不要。`statusline.py` を各 CLI 配下の安定した場所（Claude Code は `~/.claude/claude-statusline/statusline.py`、Antigravity CLI は `~/.gemini/antigravity-cli/claude-statusline/statusline.py`）へ原子的にコピーし、`settings.json` からそのコピー先を直接実行する。`npx` のキャッシュが消えても動作し続け、描画時に Node は起動しない。
 
-対話端末（TTY）で `--install` を実行すると、各 CLI の導入状態を表示した選択メニューが出る:
+対話端末（TTY）で `--install` を実行すると、各 CLI の導入状態を表示したチェックボックスメニューが出る（`↑↓` で移動、`Space` で選択/解除、`a` で全選択/全解除、`Enter` で確定）:
 
 ```
-Select target to install statusLine:
-  1) Claude Code (~/.claude/settings.json) [installed v2.1.0]
-  2) Antigravity CLI (~/.gemini/antigravity-cli/settings.json) [not installed]
-  3) Both
-Enter choice [1-3] (default: 1):
+Select targets to install statusLine (↑↓ move, Space toggle, a all, Enter confirm, Esc cancel):
+❯ ◉ Claude Code (~/.claude/settings.json) [installed v2.3.0]
+  ◯ Antigravity CLI (~/.gemini/antigravity-cli/settings.json) [not installed]
 ```
 
 対象の `settings.json`（Claude Code は `~/.claude/settings.json`、Antigravity CLI は `~/.gemini/antigravity-cli/settings.json`）に `statusLine` の項目を書き込む（既存ファイルは事前に退避する）。どちらも再起動なしで反映する。
